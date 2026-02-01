@@ -9,6 +9,7 @@ Joomla component i18n translation workflows with MCP tools.
 In Claude Code, run:
 
 ```
+/plugin marketplace add zb-ss/claude-plugin-translate
 /plugin install translate@zb-ss-translate
 ```
 
