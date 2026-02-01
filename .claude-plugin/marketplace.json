@@ -1,0 +1,15 @@
+{
+  "name": "claude-plugin-translate",
+  "description": "Joomla i18n translation workflows for Claude Code",
+  "owner": {
+    "name": "zb-ss"
+  },
+  "plugins": [
+    {
+      "name": "translate",
+      "source": "./",
+      "description": "Joomla component i18n translation workflows",
+      "version": "1.0.0"
+    }
+  ]
+}
