@@ -1,5 +1,5 @@
 {
-  "name": "claude-plugin-translate",
+  "name": "zb-ss-translate",
   "description": "Joomla i18n translation workflows for Claude Code",
   "owner": {
     "name": "zb-ss"

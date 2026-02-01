@@ -4,17 +4,22 @@ Joomla component i18n translation workflows.
 
 ## Installation
 
-Add to your Claude Code configuration:
-
-```bash
-claude --plugin-dir /path/to/translate
-```
-
-Or add to your settings:
+Add to your Claude Code `settings.json`:
 
 ```json
 {
-  "plugins": ["/path/to/translate"]
+  "extraKnownMarketplaces": {
+    "zb-ss-translate": {
+      "source": {
+        "source": "github",
+        "owner": "zb-ss",
+        "repo": "claude-plugin-translate"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "translate@zb-ss-translate": true
+  }
 }
 ```
 
