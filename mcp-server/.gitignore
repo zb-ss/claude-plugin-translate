@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (except bundle)
+dist/*.js
+dist/*.js.map
+dist/*.d.ts
+dist/*.d.ts.map
+dist/tools/
+
+# Keep the bundle
+!dist/bundle.mjs

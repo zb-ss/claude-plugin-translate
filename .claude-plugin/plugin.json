@@ -1,5 +1,9 @@
 {
   "name": "translate",
-  "description": "Joomla translation workflow commands",
-  "version": "1.0.0"
+  "description": "Joomla translation workflow commands with MCP tools",
+  "version": "1.1.0",
+  "mcp": {
+    "command": "node",
+    "args": ["mcp-server/dist/bundle.mjs"]
+  }
 }
