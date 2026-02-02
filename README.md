@@ -36,42 +36,42 @@ npm run build   # Compiles TypeScript and creates bundle
 ```
 
 ## Skills
-```
+
 | Skill | Command | Description |
 |-------|---------|-------------|
 | auto | `/translate:auto` | Automated translation workflow |
 | view | `/translate:view` | View translation differences |
 | review | `/translate:review` | Review translations for quality |
-```
+
 ## MCP Tools
 
 The plugin provides 13 MCP tools for translation workflows:
 
 ### String Detection & Conversion
-```bash
+
 | Tool | Description |
 |------|-------------|
 | `i18n_hardcode_finder` | Find hardcoded strings in PHP/HTML/JS files using 700+ regex patterns |
 | `i18n_convert` | Convert hardcoded strings to i18n calls with backup/rollback |
 | `i18n_extract` | Extract existing Text::_() calls from code |
 | `i18n_verify` | Verify all Text::_() calls have matching INI keys |
-```
+
 ### INI File Management
-```bash
+
 | Tool | Description |
 |------|-------------|
 | `ini_builder` | Create, add, validate, and diff INI language files |
-```
+
 ### Chunking (Large Files)
-```bash
+
 | Tool | Description |
 |------|-------------|
 | `file_chunker` | Split large files into processable chunks |
 | `chunk_reader` | Read specific chunks with context |
 | `chunk_state` | Track chunk processing progress |
-```
+
 ### Workflow Orchestration
-```bash
+
 | Tool | Description |
 |------|-------------|
 | `workflow_translate_init` | Initialize translation workflow for a component |
@@ -79,7 +79,7 @@ The plugin provides 13 MCP tools for translation workflows:
 | `workflow_translate_view_done` | Mark view as processed |
 | `workflow_translate_review` | Submit review result |
 | `workflow_translate_status` | Get workflow status |
-```
+
 ## Usage Examples
 
 ### Automated Translation
