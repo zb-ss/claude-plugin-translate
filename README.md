@@ -36,7 +36,7 @@ npm run build   # Compiles TypeScript and creates bundle
 ```
 
 ## Skills
-```bash
+```
 | Skill | Command | Description |
 |-------|---------|-------------|
 | auto | `/translate:auto` | Automated translation workflow |
