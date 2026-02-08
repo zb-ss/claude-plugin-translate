@@ -45,7 +45,7 @@ npm run build   # Compiles TypeScript and creates bundle
 
 ## MCP Tools
 
-The plugin provides 13 MCP tools for translation workflows:
+The plugin provides 14 MCP tools for translation workflows:
 
 ### String Detection & Conversion
 
@@ -76,6 +76,7 @@ The plugin provides 13 MCP tools for translation workflows:
 |------|-------------|
 | `workflow_translate_init` | Initialize translation workflow for a component |
 | `workflow_translate_next` | Get next view to process |
+| `workflow_translate_next_batch` | Get batch of up to 4 views for parallel processing |
 | `workflow_translate_view_done` | Mark view as processed |
 | `workflow_translate_review` | Submit review result |
 | `workflow_translate_status` | Get workflow status |
