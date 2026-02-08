@@ -381,6 +381,121 @@ export const workflowNextTool = {
 }
 
 // ============================================
+// Workflow Next Batch Tool
+// ============================================
+
+export const workflowNextBatchSchema = z.object({
+  workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  batchSize: z.number().min(1).max(4).default(4).describe("Number of views to return (1-4, default 4)")
+})
+
+export type WorkflowNextBatchArgs = z.infer<typeof workflowNextBatchSchema>
+
+export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Promise<string> {
+  const workflowId = args.workflowId || findActiveWorkflow()
+  if (!workflowId) {
+    return JSON.stringify({ success: false, error: "No active workflow found" })
+  }
+
+  const state = loadWorkflowState(workflowId)
+  if (!state) {
+    return JSON.stringify({ success: false, error: `Workflow not found: ${workflowId}` })
+  }
+
+  const pendingViews = state.views.filter(v => v.status === "pending" || v.status === "error")
+
+  if (pendingViews.length === 0) {
+    const allDone = state.views.every(v => v.status === "done")
+    if (allDone) {
+      state.status = "complete"
+      saveWorkflowState(state)
+      return JSON.stringify({
+        success: true,
+        complete: true,
+        message: "All views processed!",
+        summary: {
+          totalViews: state.views.length,
+          stringsConverted: state.totalStringsConverted,
+          errors: state.totalErrors
+        }
+      })
+    }
+    return JSON.stringify({ success: false, error: "No views ready to process" })
+  }
+
+  const batchSize = Math.min(args.batchSize ?? 4, 4, pendingViews.length)
+  const batch = pendingViews.slice(0, batchSize)
+
+  // Mark all batch views as processing atomically
+  for (const view of batch) {
+    view.status = "processing"
+    view.attempts++
+  }
+  saveWorkflowState(state)
+
+  const batchViews = batch.map(view => {
+    const chunkingInstructions = view.needsChunking ? {
+      required: true,
+      reason: `File has ${view.lines} lines (>500), MUST use chunking`,
+      steps: [
+        `1. file_chunker(filePath="${view.path}", chunkSize=150, overlap=20)`,
+        `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${view.path}", startLine=X, endLine=Y)`,
+        `3. Combine all findings, remove duplicates from overlaps`,
+        `4. Convert ALL strings found with i18n_convert`,
+        `5. DO NOT skip or defer this file - process it completely`
+      ]
+    } : {
+      required: false,
+      reason: `File has ${view.lines} lines (<500), can process directly`
+    }
+
+    return {
+      path: view.path,
+      relativePath: view.relativePath,
+      lines: view.lines,
+      needsChunking: view.needsChunking,
+      attempt: view.attempts,
+      previousErrors: view.errors,
+      chunking: chunkingInstructions
+    }
+  })
+
+  const done = state.views.filter(v => v.status === "done").length
+
+  return JSON.stringify({
+    success: true,
+    workflowId: state.id,
+    componentName: state.componentName,
+    targetLanguage: state.targetLanguage,
+    sourceLanguage: state.sourceLanguage,
+    sourceIniPath: state.sourceIniPath,
+    targetIniPath: state.targetIniPath,
+    batchSize: batch.length,
+    views: batchViews,
+    progress: {
+      total: state.views.length,
+      done,
+      pending: pendingViews.length - batch.length,
+      processing: batch.length
+    }
+  }, null, 2)
+}
+
+export const workflowNextBatchTool = {
+  name: "workflow_translate_next_batch",
+  description: "Get a batch of up to N pending views for parallel processing. Marks all returned views as 'processing' atomically.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      batchSize: { type: "number", description: "Number of views to return (1-4, default 4)", default: 4 }
+    },
+    required: []
+  },
+  execute: executeWorkflowNextBatch
+}
+
+// ============================================
 // Workflow View Done Tool
 // ============================================
 

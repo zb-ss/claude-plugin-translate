@@ -1,10 +1,10 @@
 ---
-description: Fully automatic Joomla component translation workflow with progress tracking
+description: Fully automatic Joomla component translation workflow with parallel batch processing
 ---
 
-# Auto Translation Workflow
+# Auto Translation Workflow (Parallel Orchestrator)
 
-Automatically translate an entire Joomla component by processing all view files.
+Automatically translate an entire Joomla component by processing view files in parallel batches.
 
 ## AGENTIC MODE ACTIVE
 
@@ -15,7 +15,7 @@ This workflow runs in **agentic mode** with expanded permissions:
 - Create feature branches for translation work
 - Run `php -l` validation after edits
 - Create workflow state files in `~/.claude/workflows/`
-- Process files in chunks without confirmation
+- Spawn executor agents for parallel processing
 
 **BLOCKED (user does manually):**
 - `git commit` - User reviews translations first
@@ -41,203 +41,233 @@ $ARGUMENTS
 ## Examples
 
 ```
-/translate-auto /var/www/joomla/administrator/components/com_lots fr-CA
-/translate-auto ./components/com_inventory es-ES --dry-run
-/translate-auto /path/to/com_mycomp de-DE --resume
+/translate:auto /var/www/joomla/administrator/components/com_lots fr-CA
+/translate:auto ./components/com_inventory es-ES --dry-run
+/translate:auto /path/to/com_mycomp de-DE --resume
 ```
 
-## Workflow Overview
+---
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    TRANSLATION WORKFLOW                      │
-├─────────────────────────────────────────────────────────────┤
-│  1. INIT        Scan component, build view queue            │
-│  2. LOOP        For each view:                              │
-│     ├─ PROCESS  Run /translate-view on file                 │
-│     ├─ REVIEW   Validate translations (optional)            │
-│     └─ NEXT     Move to next view                           │
-│  3. FINALIZE    Generate summary report                     │
-└─────────────────────────────────────────────────────────────┘
-```
+## CRITICAL ORCHESTRATOR RULES
 
-## Step 1: Initialize
+You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process views directly**.
 
-### Scan Component Structure
+### You MUST NOT:
+- Call `i18n_hardcode_finder` yourself
+- Call `i18n_convert` yourself
+- Call `file_chunker` or `chunk_reader` yourself
+- Directly edit any PHP view files
 
-Find all translatable view files:
-```
-{component}/
-├── views/           # Frontend views (Joomla 3)
-├── tmpl/            # Frontend templates (Joomla 4+)
-├── administrator/
-│   └── views/       # Admin views (Joomla 3)
-│   └── tmpl/        # Admin templates (Joomla 4+)
-└── src/View/        # Namespaced views (Joomla 4+)
-```
+### You MUST:
+- Use `workflow_translate_next_batch` to get batches of views
+- Spawn executor agents (via Task tool) to process views in parallel
+- Collect INI entries from executor results
+- Call `ini_builder` yourself (sequentially, never in parallel)
+- Call `workflow_translate_view_done` and `workflow_translate_review` yourself
 
-File patterns to include:
-- `*.php` in tmpl directories
-- `*.php` view files
-- Exclude: `index.html`, `metadata.xml`
+---
 
-### Build View Queue
+## Workflow Steps
 
-Create a tracking structure:
-```
-Views to process:
-1. [PENDING] admin/views/item/tmpl/edit.php (450 lines)
-2. [PENDING] admin/views/item/tmpl/default.php (280 lines)
-3. [PENDING] admin/views/items/tmpl/default.php (620 lines, CHUNKED)
-...
-```
+### Step 1: Initialize
 
-### Identify INI Files
+1. Call `workflow_translate_init(componentPath, targetLanguage)`
+2. Create a feature branch: `feature/translate/{component}-{lang}`
+3. Note the `workflowId`, `sourceIniPath`, `targetIniPath`, total views count
 
-```
-Source: {component}/administrator/language/en-GB/com_{name}.ini
-Target: {component}/administrator/language/{lang}/com_{name}.ini
+### Step 2: Batch Processing Loop
 
-# Create target INI if doesn't exist (copy from source as template)
-```
+Repeat until all views are processed:
 
-## Step 2: Process Loop
+#### Phase 1 — Get Batch
 
-For each view in queue:
+Call `workflow_translate_next_batch(batchSize=4)`.
 
-### 2a. Process View
+If response has `complete: true`, go to Step 3 (Finalize).
 
-Use the translate-view command logic:
-```
-Processing: admin/views/item/tmpl/edit.php
-- Lines: 450 (single pass)
-- Found: 23 hardcoded strings
-- Converting...
+#### Phase 2 — Spawn Parallel Executors
+
+For each view in the batch, spawn an executor agent using the Task tool:
+
+- **Agent type**: `general-purpose`
+- **Model**: `haiku` for files < 300 lines, `sonnet` for files >= 300 lines
+- **Run in background**: `true` for batches of 2+, `false` for single view (process inline)
+- **Prompt**: Use the executor prompt template below, filled with view-specific data
+
+**IMPORTANT**: Spawn ALL executors in a single message (parallel tool calls). Do NOT wait for one to finish before spawning the next.
+
+#### Phase 3 — Collect Results
+
+Wait for all background executors to complete. Each executor returns a JSON result with:
+```json
+{
+  "viewPath": "/path/to/view.php",
+  "stringsFound": 15,
+  "stringsConverted": 14,
+  "sourceEntries": [{"key": "COM_FOO_LABEL", "value": "English text"}],
+  "targetEntries": [{"key": "COM_FOO_LABEL", "value": "Translated text"}],
+  "errors": []
+}
 ```
 
-**Large file handling:**
-- Files > 300 lines: Use chunking strategy
-- Process chunks sequentially
-- Merge results, deduplicate overlaps
-- Apply edits bottom-to-top
+#### Phase 4 — Merge INI Entries (Sequential)
 
-### 2b. Quick Validation
+After ALL executors in the batch complete:
 
-After each view:
-```bash
-php -l {view_file}
-```
+1. Collect all `sourceEntries` from all executor results
+2. Collect all `targetEntries` from all executor results
+3. Call `ini_builder(action="add", filePath=sourceIniPath, entries=<all source entries>)` — single atomic call
+4. Call `ini_builder(action="add", filePath=targetIniPath, entries=<all target entries>)` — single atomic call
 
-If syntax error:
-1. Identify problematic edit
-2. Roll back that specific change
-3. Mark string for manual review
-4. Continue with remaining strings
+**NEVER call ini_builder in parallel. Always sequential.**
 
-### 2c. Review (Optional)
+#### Phase 5 — Mark Views Done
 
-If `--skip-review` not set:
-- Check that all `Text::_()` calls have matching INI keys
-- Verify no hardcoded strings were missed
-- Validate INI file integrity
+For each view in the batch:
 
-### 2d. Update Progress
+1. Call `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, errors)`
+2. Call `workflow_translate_review(workflowId, viewPath, passed=true)` (or `false` if errors)
+
+Then loop back to Phase 1 for the next batch.
+
+### Step 3: Finalize
+
+Generate a summary report:
 
 ```
-[DONE] admin/views/item/tmpl/edit.php (23 strings)
-[DOING] admin/views/items/tmpl/default.php...
-[PENDING] admin/views/category/tmpl/default.php
-```
-
-## Step 3: Finalize
-
-### Generate Summary Report
-
-```
-═══════════════════════════════════════════════════════════════
+================================================================
                     TRANSLATION COMPLETE
-═══════════════════════════════════════════════════════════════
+================================================================
 
-Component: com_lots
-Target Language: fr-CA
-Duration: ~15 minutes
+Component: com_{name}
+Target Language: {lang}
 
 VIEWS PROCESSED
-───────────────────────────────────────────────────────────────
-Total Views: 12
-├─ Completed: 11
-├─ Skipped (no strings): 1
-└─ Failed: 0
+----------------------------------------------------------------
+Total Views: {N}
+  Completed: {N}
+  Failed: {N}
 
-STRINGS CONVERTED
-───────────────────────────────────────────────────────────────
-Total Found: 187
-├─ Auto-converted: 183
-├─ Manual review needed: 4
-└─ Skipped (false positive): 0
-
-BY TYPE:
-  Labels:        45
-  Placeholders:  23
-  Headings:      18
-  Buttons:       31
-  Messages:      42
-  JS Strings:    15
-  Other:         13
+STRINGS CONVERTED: {N}
 
 INI FILE UPDATES
-───────────────────────────────────────────────────────────────
-en-GB.com_lots.ini: +187 keys (was 45, now 232)
-fr-CA.com_lots.ini: +187 keys (was 0, now 187)
-
-MANUAL REVIEW REQUIRED
-───────────────────────────────────────────────────────────────
-1. admin/views/item/tmpl/edit.php:145
-   Complex concatenation: "Total: " . $count . " items"
-
-2. admin/views/report/tmpl/default.php:89
-   Dynamic string in JavaScript
-
-NEXT STEPS
-───────────────────────────────────────────────────────────────
-1. Review the 4 strings marked for manual attention
-2. Test the component in both languages
-3. Run: php artisan lang:check (if using Laravel Mix)
-
-═══════════════════════════════════════════════════════════════
+----------------------------------------------------------------
+{source}.ini: +{N} keys
+{target}.ini: +{N} keys
+================================================================
 ```
 
-## Progress Tracking
+---
 
-The workflow maintains state in:
+## Executor Agent Prompt Template
+
+Use this template when spawning executor agents. Replace all `{placeholders}`.
+
 ```
-~/.claude/workflows/active/translate-{component}-{timestamp}/
-├── workflow.json      # Overall state
-├── view-queue.json    # View processing status
-└── strings.json       # All extracted strings with status
+You are a translation executor agent. Process EXACTLY ONE view file for Joomla i18n translation.
+
+## YOUR TARGET
+- **File**: {view.path}
+- **Component**: com_{componentName}
+- **Lines**: {view.lines}
+- **Needs chunking**: {view.needsChunking}
+
+## WHAT YOU MUST DO
+
+### 1. Detect Hardcoded Strings
+
+{IF view.needsChunking}
+This is a LARGE file ({view.lines} lines). You MUST use chunking:
+1. Call file_chunker(filePath="{view.path}", chunkSize=150, overlap=20)
+2. For EACH chunk returned, call i18n_hardcode_finder(filePath="{view.path}", startLine=X, endLine=Y)
+3. Combine all findings, remove duplicates from overlap regions
+{ELSE}
+Call i18n_hardcode_finder(filePath="{view.path}") to detect all hardcoded strings.
+{ENDIF}
+
+### 2. Convert Each String
+
+For EACH hardcoded string found, call i18n_convert to replace it in the PHP file:
+- Use Joomla Text::_() for PHP strings
+- Use Joomla.Text._() for JavaScript strings
+- Key format: COM_{COMPONENT}_{TYPE}_{DESCRIPTOR}
+
+### 3. DO NOT Call ini_builder
+
+You MUST NOT call ini_builder. Instead, collect all INI entries and return them in your output.
+
+### 4. Validate PHP Syntax
+
+Run: php -l {view.path}
+If syntax error, fix it before returning.
+
+### 5. Return Results
+
+Your final message MUST be valid JSON (and ONLY JSON, no other text):
+```json
+{
+  "viewPath": "{view.path}",
+  "stringsFound": <number>,
+  "stringsConverted": <number>,
+  "sourceEntries": [{"key": "COM_X_Y", "value": "English text"}, ...],
+  "targetEntries": [{"key": "COM_X_Y", "value": "Translated text"}, ...],
+  "errors": ["error message if any"]
+}
 ```
 
-This allows:
-- Resuming interrupted workflows
-- Tracking what was changed where
-- Rolling back if needed
+## TRANSLATION RULES FOR {targetLanguage}
 
-## Error Recovery
+{IF targetLanguage == "fr-CA"}
+- Formal "vous" (never "tu")
+- Space before : ; ? !
+- Use « guillemets français »
+- "courriel" not "email", "téléverser" not "uploader"
+{ELSEIF targetLanguage == "es-ES"}
+- Use ¿ and ¡ for questions/exclamations
+- Formal "usted" for admin interfaces
+{ELSEIF targetLanguage == "de-DE"}
+- Capitalize all nouns
+- Formal "Sie"
+- Compound words where appropriate
+{ENDIF}
 
-| Error | Action |
-|-------|--------|
-| PHP syntax error | Roll back last edit, mark for manual |
-| INI parse error | Escape special characters, retry |
-| File not found | Skip, warn user |
-| Permission denied | Stop, report issue |
-| Interrupted | Save state, allow `--resume` |
+## CRITICAL RULES
+- Process ONLY {view.path} — no other files
+- DO NOT call ini_builder — return entries as JSON
+- DO NOT call workflow_translate_view_done or workflow_translate_review
+- Your output MUST be parseable JSON
+```
+
+---
+
+## Edge Cases
+
+### Single View Remaining
+
+If `workflow_translate_next_batch` returns only 1 view, spawn a single executor (not in background) to avoid overhead. Still collect its result and merge INI entries the same way.
+
+### Executor Failure
+
+If an executor returns errors or no valid JSON:
+1. Log the error
+2. Call `workflow_translate_view_done` with the errors
+3. Call `workflow_translate_review(passed=false, issues=<error>)`
+4. The view will be retried in a future batch (up to 3 attempts)
+
+### Large File Mix
+
+Batches may contain a mix of small and large files. Use appropriate model:
+- `haiku` for < 300 lines (fast, cheap)
+- `sonnet` for >= 300 lines (more capable for chunked processing)
+
+---
 
 ## Language-Specific Rules
 
 ### French Canadian (fr-CA)
 - Formal "vous"
 - Space before : ; ? !
-- «guillemets français»
+- « guillemets français »
 - courriel, téléverser, etc.
 
 ### Spanish (es-ES)
@@ -249,9 +279,12 @@ This allows:
 - Compound words
 - Formal "Sie"
 
+---
+
 ## Notes
 
-- Large components may take several minutes
+- Maximum 4 parallel executors per batch (MCP server enforces this)
+- INI files are NEVER written by executors — only the orchestrator writes INI
+- PHP files CAN be edited by executors in parallel (different files, no conflicts)
 - Always test in a development environment first
-- Backup your component before running on production code
 - Use `--dry-run` first to see what would be changed

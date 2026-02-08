@@ -29,6 +29,7 @@ import { i18nVerifyTool } from "./tools/i18n-verify.js"
 import {
   workflowInitTool,
   workflowNextTool,
+  workflowNextBatchTool,
   workflowViewDoneTool,
   workflowReviewTool,
   workflowStatusTool
@@ -46,6 +47,7 @@ const tools = [
   i18nVerifyTool,
   workflowInitTool,
   workflowNextTool,
+  workflowNextBatchTool,
   workflowViewDoneTool,
   workflowReviewTool,
   workflowStatusTool
