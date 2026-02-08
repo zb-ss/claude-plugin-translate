@@ -48,6 +48,7 @@ npm run build   # Compiles TypeScript and creates bundle
 The plugin provides 13 MCP tools for translation workflows:
 
 ### String Detection & Conversion
+
 | Tool | Description |
 |------|-------------|
 | `i18n_hardcode_finder` | Find hardcoded strings in PHP/HTML/JS files using 700+ regex patterns |
@@ -56,11 +57,13 @@ The plugin provides 13 MCP tools for translation workflows:
 | `i18n_verify` | Verify all Text::_() calls have matching INI keys |
 
 ### INI File Management
+
 | Tool | Description |
 |------|-------------|
 | `ini_builder` | Create, add, validate, and diff INI language files |
 
 ### Chunking (Large Files)
+
 | Tool | Description |
 |------|-------------|
 | `file_chunker` | Split large files into processable chunks |
@@ -68,6 +71,7 @@ The plugin provides 13 MCP tools for translation workflows:
 | `chunk_state` | Track chunk processing progress |
 
 ### Workflow Orchestration
+
 | Tool | Description |
 |------|-------------|
 | `workflow_translate_init` | Initialize translation workflow for a component |
