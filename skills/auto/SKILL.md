@@ -12,7 +12,6 @@ This workflow runs in **agentic mode** with expanded permissions:
 
 **ALLOWED without asking:**
 - Read/Write/Edit PHP and INI files
-- Create feature branches for translation work
 - Run `php -l` validation after edits
 - Create workflow state files in `~/.claude/workflows/`
 - Spawn executor agents for parallel processing
@@ -20,8 +19,6 @@ This workflow runs in **agentic mode** with expanded permissions:
 **BLOCKED (user does manually):**
 - `git commit` - User reviews translations first
 - `git push` - User pushes when ready
-
-**Branch naming:** `feature/translate/{component}-{lang}` (e.g., `feature/translate/com-lots-fr-ca`)
 
 ---
 
@@ -90,8 +87,7 @@ You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process vi
 ### Step 1: Initialize
 
 1. Call `workflow_translate_init(componentPath, targetLanguage)`
-2. Create a feature branch: `feature/translate/{component}-{lang}`
-3. Note the `workflowId`, `sourceIniPath`, `targetIniPath`, total views count
+2. Note the `workflowId`, `sourceIniPath`, `targetIniPath`, total views count
 
 ### Step 2: Batch Processing Loop
 
