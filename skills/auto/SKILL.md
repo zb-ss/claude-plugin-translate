@@ -56,6 +56,7 @@ When this skill is invoked, you MUST immediately delegate the entire orchestrati
 2. Spawn a single Task agent with:
    - **Agent type**: `translation-coder`
    - **Model**: `sonnet`
+   - **max_turns**: `50`
    - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments
 
 The orchestrator subagent will then spawn its own executor subagents for each view.
@@ -108,7 +109,8 @@ For each view in the batch, spawn an executor agent using the Task tool:
 - **Agent type**: `translation-coder`
 - **Model**: `sonnet`
 - **Run in background**: `true` for batches of 2+, `false` for single view (process inline)
-- **Prompt**: Use the executor prompt template below, filled with view-specific data
+- **max_turns**: `25` for small files (<500 lines, no chunking), `35` for large files (needs chunking)
+- **Prompt**: Use the executor prompt template below, filled with view-specific data. Do NOT add extra commentary or context beyond the template — keep prompts lean.
 
 **IMPORTANT**: Spawn ALL executors in a single message (parallel tool calls). Do NOT wait for one to finish before spawning the next.
 
@@ -247,6 +249,12 @@ Your final message MUST be valid JSON (and ONLY JSON, no other text):
 - Compound words where appropriate
 {ENDIF}
 
+## CONTEXT EFFICIENCY
+- For files >200 lines, use `Read(filePath, offset=X, limit=Y)` to read sections instead of the whole file
+- Write/persist changes after each `i18n_convert` call — do NOT accumulate multiple changes before writing
+- Minimize re-reads: take notes on line numbers and structure, reference notes instead of re-reading
+- Keep output minimal — return ONLY the final JSON result, no verbose logging or commentary
+
 ## CRITICAL RULES
 - Process ONLY {view.path} — no other files
 - DO NOT call ini_builder — return entries as JSON
@@ -273,6 +281,39 @@ If an executor returns errors or no valid JSON:
 ### Large File Mix
 
 Batches may contain a mix of small and large files. All executors use **sonnet** regardless of file size for consistent quality.
+
+---
+
+## Context Resilience
+
+### Executor Context Exhaustion
+
+If an executor's output contains "context limit", is truncated, or returns empty/unparseable results:
+1. Treat it as a failure
+2. Call `workflow_translate_review(passed=false, issues="context limit exhausted")`
+3. The view will be retried in the next batch (up to 3 attempts per existing retry logic)
+
+### Orchestrator Result Minimization
+
+When reading executor results via `TaskOutput`:
+- Extract ONLY the final JSON block from the output
+- Do NOT accumulate or reference full executor conversation histories
+- Parse the JSON, store the structured data, discard everything else
+
+### Progress Persistence & Recovery
+
+- INI entries are merged immediately after each batch — this is the save point
+- Each completed view is tracked via `workflow_translate_view_done` calls
+- If the orchestrator itself hits a context limit, the workflow state persists
+- A `--resume` invocation picks up from the last incomplete view automatically
+
+### max_turns Budget
+
+| Agent | max_turns | When |
+|-------|-----------|------|
+| Orchestrator | 50 | Always |
+| Executor (small) | 25 | File <500 lines, no chunking |
+| Executor (large) | 35 | File needs chunking |
 
 ---
 
