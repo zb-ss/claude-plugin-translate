@@ -1,11 +1,35 @@
 {
   "name": "translate",
   "description": "Joomla translation workflow commands with MCP tools",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "mcpServers": {
     "translate": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/bundle.mjs"]
     }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_translate_translate__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/approve-mcp.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/approve-bash.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }
