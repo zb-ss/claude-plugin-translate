@@ -48,6 +48,22 @@ $ARGUMENTS
 
 ---
 
+## DELEGATION — Spawn Orchestrator as Sonnet Subagent
+
+When this skill is invoked, you MUST immediately delegate the entire orchestration to a **sonnet** subagent. Do NOT run the orchestration loop yourself.
+
+1. Parse the arguments (`componentPath`, `targetLanguage`, flags like `--dry-run`, `--resume`, `--skip-review`)
+2. Spawn a single Task agent with:
+   - **Agent type**: `translation-coder`
+   - **Model**: `sonnet`
+   - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments
+
+The orchestrator subagent will then spawn its own executor subagents for each view.
+
+Your only job after delegation is to relay the final summary back to the user.
+
+---
+
 ## CRITICAL ORCHESTRATOR RULES
 
 You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process views directly**.
@@ -89,8 +105,8 @@ If response has `complete: true`, go to Step 3 (Finalize).
 
 For each view in the batch, spawn an executor agent using the Task tool:
 
-- **Agent type**: `general-purpose`
-- **Model**: `haiku` for files < 300 lines, `sonnet` for files >= 300 lines
+- **Agent type**: `translation-coder`
+- **Model**: `sonnet`
 - **Run in background**: `true` for batches of 2+, `false` for single view (process inline)
 - **Prompt**: Use the executor prompt template below, filled with view-specific data
 
@@ -256,9 +272,7 @@ If an executor returns errors or no valid JSON:
 
 ### Large File Mix
 
-Batches may contain a mix of small and large files. Use appropriate model:
-- `haiku` for < 300 lines (fast, cheap)
-- `sonnet` for >= 300 lines (more capable for chunked processing)
+Batches may contain a mix of small and large files. All executors use **sonnet** regardless of file size for consistent quality.
 
 ---
 
