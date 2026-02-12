@@ -70,7 +70,7 @@ Your only job after delegation is to relay the final summary back to the user.
 You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process views directly**.
 
 ### You MUST NOT:
-- Call `i18n_hardcode_finder` yourself
+- Call `i18n_hardcode_finder` yourself (EXCEPTION: verification agents in Phase 5 may call it)
 - Call `i18n_convert` yourself
 - Call `file_chunker` or `chunk_reader` yourself
 - Directly edit any PHP view files
@@ -80,7 +80,8 @@ You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process vi
 - Spawn executor agents (via Task tool) to process views in parallel
 - Collect INI entries from executor results
 - Call `ini_builder` yourself (sequentially, never in parallel)
-- Call `workflow_translate_view_done` and `workflow_translate_review` yourself
+- After each batch, spawn 4 parallel verification agents (Phase 5) and use their pass/fail results to decide `workflow_translate_review` outcomes
+- Call `workflow_translate_view_done` and `workflow_translate_review` yourself based on verification results
 
 ---
 
@@ -109,7 +110,7 @@ For each view in the batch, spawn an executor agent using the Task tool:
 - **Agent type**: `translation-coder`
 - **Model**: `sonnet`
 - **Run in background**: `true` for batches of 2+, `false` for single view (process inline)
-- **max_turns**: `25` for small files (<500 lines, no chunking), `35` for large files (needs chunking)
+- **max_turns**: `30` for small files (<500 lines, no chunking), `40` for large files (needs chunking)
 - **Prompt**: Use the executor prompt template below, filled with view-specific data. Do NOT add extra commentary or context beyond the template — keep prompts lean.
 
 **IMPORTANT**: Spawn ALL executors in a single message (parallel tool calls). Do NOT wait for one to finish before spawning the next.
@@ -139,18 +140,51 @@ After ALL executors in the batch complete:
 
 **NEVER call ini_builder in parallel. Always sequential.**
 
-#### Phase 5 — Mark Views Done
+#### Phase 5 — Verification Suite
 
-For each view in the batch:
+Spawn 4 verification agents in parallel (single message, all as background tasks):
 
-1. Call `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, errors)`
-2. Call `workflow_translate_review(workflowId, viewPath, passed=true)` (or `false` if errors)
+- **Agent type**: `translation-coder`
+- **Model**: `sonnet`
+- **max_turns**: `15`
+- **Run in background**: `true`
+
+Each agent receives: the list of view paths from this batch, the component name, target language, source/target INI paths, and its specific verification checklist (see Verification Agent Prompt Templates section).
+
+The 4 agents are:
+1. **Hardcoded String Verifier** — re-scans each view with `i18n_hardcode_finder`
+2. **JS Safety Verifier** — checks for apostrophe/quote escaping issues in JS contexts
+3. **PHP Integrity Verifier** — runs `php -l`, checks `use` imports and function usage
+4. **i18n Facility Verifier** — validates key naming, placeholder counts, `Text::script()` usage
+
+**IMPORTANT**: Spawn ALL 4 agents in a single message (parallel tool calls).
+
+#### Phase 6 — Collect Verification & Mark Views
+
+Wait for all 4 verification agents to complete. Each returns JSON:
+```json
+{
+  "results": [
+    {
+      "viewPath": "/path/to/view.php",
+      "passed": true,
+      "issues": []
+    }
+  ]
+}
+```
+
+For each view, aggregate results from all 4 agents:
+- **ALL 4 pass** → `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, [])` + `workflow_translate_review(workflowId, viewPath, passed=true)`
+- **ANY fail** → `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, errors=<aggregated issues>)` + `workflow_translate_review(workflowId, viewPath, passed=false, issues=<aggregated issues>)` — view will be retried in next batch (up to 3 attempts)
 
 Then loop back to Phase 1 for the next batch.
 
 ### Step 3: Finalize
 
-Generate a summary report:
+1. Call `i18n_verify(componentPath, targetLanguage)` to validate INI key completeness across the whole component
+2. Note any missing keys or orphan keys from the verification result
+3. Generate the summary report:
 
 ```
 ================================================================
@@ -172,6 +206,23 @@ INI FILE UPDATES
 ----------------------------------------------------------------
 {source}.ini: +{N} keys
 {target}.ini: +{N} keys
+
+VERIFICATION RESULTS
+----------------------------------------------------------------
+  Hardcoded Strings:  {N} views clean, {N} failed
+  JS Safety:          {N} views clean, {N} failed
+  PHP Integrity:      {N} views clean, {N} failed
+  i18n Facilities:    {N} views clean, {N} failed
+
+RETRIES
+----------------------------------------------------------------
+  Views retried: {N}
+  Max attempts reached: {N} (manual fix needed)
+
+WARNINGS (from i18n_verify)
+----------------------------------------------------------------
+  Missing keys: {N}
+  Orphan keys: {N}
 ================================================================
 ```
 
@@ -189,6 +240,12 @@ You are a translation executor agent. Process EXACTLY ONE view file for Joomla i
 - **Component**: com_{componentName}
 - **Lines**: {view.lines}
 - **Needs chunking**: {view.needsChunking}
+
+{IF view.attempt > 1}
+## RETRY ATTEMPT {view.attempt}/3
+Previous attempt failed verification. Errors: {view.previousErrors}
+Scan the ENTIRE file from scratch — do not assume prior work was correct.
+{ENDIF}
 
 ## WHAT YOU MUST DO
 
@@ -219,7 +276,13 @@ You MUST NOT call ini_builder. Instead, collect all INI entries and return them 
 Run: php -l {view.path}
 If syntax error, fix it before returning.
 
-### 5. Return Results
+### 5. Self-Verify — Re-scan for Remaining Strings
+
+Run i18n_hardcode_finder on the file again.
+If summary.total > 0: convert remaining strings, validate syntax, re-scan.
+Repeat up to 2 re-scan cycles. Proceed only when clean or cycles exhausted.
+
+### 6. Return Results
 
 Your final message MUST be valid JSON (and ONLY JSON, no other text):
 ```json
@@ -260,6 +323,152 @@ Your final message MUST be valid JSON (and ONLY JSON, no other text):
 - DO NOT call ini_builder — return entries as JSON
 - DO NOT call workflow_translate_view_done or workflow_translate_review
 - Your output MUST be parseable JSON
+```
+
+---
+
+## Verification Agent Prompt Templates
+
+Use these templates when spawning the 4 verification agents in Phase 5. Replace all `{placeholders}`.
+
+### Agent 1: Hardcoded String Verifier
+
+```
+You are a verification agent. Check for remaining hardcoded strings in translated view files.
+
+## FILES TO VERIFY
+{list of viewPaths from batch, one per line}
+
+## COMPONENT INFO
+- Component: com_{componentName}
+- Target language: {targetLanguage}
+- Source INI: {sourceIniPath}
+- Target INI: {targetIniPath}
+
+## YOUR CHECKS
+
+For EACH view file listed above:
+1. Call i18n_hardcode_finder(filePath=viewPath)
+2. If summary.total === 0 → PASS
+3. If summary.total > 0 → FAIL (report the texts and line numbers)
+
+## OUTPUT
+
+Return ONLY valid JSON (no other text):
+{
+  "results": [
+    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
+    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Line 42: 'Save Changes' still hardcoded", "Line 87: 'Delete' still hardcoded"]}
+  ]
+}
+```
+
+### Agent 2: JS Safety Verifier
+
+```
+You are a verification agent. Check for JavaScript apostrophe/quote escaping issues in translated view files.
+
+## FILES TO VERIFY
+{list of viewPaths from batch, one per line}
+
+## COMPONENT INFO
+- Component: com_{componentName}
+- Target language: {targetLanguage}
+- Source INI: {sourceIniPath}
+- Target INI: {targetIniPath}
+
+## YOUR CHECKS
+
+For EACH view file listed above, Read the file and check:
+1. Any Joomla.Text._() or Joomla.JText._() calls where the corresponding INI value contains unescaped apostrophes or quotes
+2. Inline JS strings containing Text::_() inside single quotes (e.g., var x = '<?php echo Text::_("KEY"); ?>')
+3. JS context strings should use Text::script() registration or echo into a data attribute, not direct echo into JS string literals
+4. Read the target INI file and check: any values containing ' (apostrophe) that are used in JS-context keys
+
+If no JS escaping risks found → PASS
+If any issues → FAIL (report which keys/lines have unsafe values)
+
+## OUTPUT
+
+Return ONLY valid JSON (no other text):
+{
+  "results": [
+    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
+    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Line 55: Text::_('COM_FOO_TITLE') echoed inside JS single-quoted string", "Key COM_FOO_MSG has apostrophe in INI value used in JS context"]}
+  ]
+}
+```
+
+### Agent 3: PHP Integrity Verifier
+
+```
+You are a verification agent. Check PHP syntax, imports, and function usage in translated view files.
+
+## FILES TO VERIFY
+{list of viewPaths from batch, one per line}
+
+## COMPONENT INFO
+- Component: com_{componentName}
+- Target language: {targetLanguage}
+- Source INI: {sourceIniPath}
+- Target INI: {targetIniPath}
+
+## YOUR CHECKS
+
+For EACH view file listed above:
+1. Run `php -l {viewPath}` — must pass with no syntax errors
+2. If the file uses `Text::_` or `Text::sprintf`, verify that `use Joomla\CMS\Language\Text;` exists in the file (or `use Joomla\CMS\Language\Text as Text;`). If the file uses `JText::_` instead, that is also acceptable (Joomla 3 compat)
+3. Check for concatenation anti-patterns: `Text::_('KEY') . $var` should be `Text::sprintf('KEY_WITH_VAR', $var)`
+4. Check that `Text::_()` is not called with sprintf-style placeholders in the INI value (should use `Text::sprintf()` instead)
+
+If all checks pass → PASS
+If any issue → FAIL (report specific issues per view)
+
+## OUTPUT
+
+Return ONLY valid JSON (no other text):
+{
+  "results": [
+    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
+    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["PHP syntax error on line 23", "Missing 'use Joomla\\CMS\\Language\\Text;' import", "Line 45: Text::_('KEY') concatenated with $var — use Text::sprintf instead"]}
+  ]
+}
+```
+
+### Agent 4: i18n Facility Verifier
+
+```
+You are a verification agent. Check i18n key naming, placeholder counts, and Text::script() usage in translated view files.
+
+## FILES TO VERIFY
+{list of viewPaths from batch, one per line}
+
+## COMPONENT INFO
+- Component: com_{componentName}
+- Target language: {targetLanguage}
+- Source INI: {sourceIniPath}
+- Target INI: {targetIniPath}
+
+## YOUR CHECKS
+
+For EACH view file listed above, Read the file and check:
+1. All Text::_('KEY') keys match the expected naming convention COM_{COMPONENT}_{TYPE}_{DESCRIPTOR} (uppercase, underscores only)
+2. No duplicate keys generated — same key should not be used for different English texts (cross-reference with source INI file)
+3. Text::sprintf() calls have matching placeholder counts: count %s/%d/%1$s in the INI value vs arguments passed to sprintf
+4. Language strings used in <script> blocks or JS event handlers (onclick, onchange, etc.) are registered via Text::script('KEY') in PHP, not echoed directly
+
+If all checks pass → PASS
+If any issue → FAIL (report mismatches)
+
+## OUTPUT
+
+Return ONLY valid JSON (no other text):
+{
+  "results": [
+    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
+    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Key COM_FOO_X does not follow naming convention", "Line 78: Text::sprintf with 2 args but INI value has 1 placeholder", "Line 92: Text::_('KEY') used in onclick handler — should use Text::script()"]}
+  ]
+}
 ```
 
 ---
@@ -312,8 +521,9 @@ When reading executor results via `TaskOutput`:
 | Agent | max_turns | When |
 |-------|-----------|------|
 | Orchestrator | 50 | Always |
-| Executor (small) | 25 | File <500 lines, no chunking |
-| Executor (large) | 35 | File needs chunking |
+| Executor (small) | 30 | File <500 lines, no chunking (+5 for self-verify loop) |
+| Executor (large) | 40 | File needs chunking (+5 for self-verify loop) |
+| Verification agent | 15 | Lightweight read-only checks |
 
 ---
 
