@@ -51,7 +51,7 @@ When this skill is invoked, you MUST immediately delegate the entire orchestrati
 
 1. Parse the arguments (`componentPath`, `targetLanguage`, flags like `--dry-run`, `--resume`, `--skip-review`)
 2. Spawn a single Task agent with:
-   - **Agent type**: `translation-coder`
+   - **Agent type**: `general-purpose`
    - **Model**: `sonnet`
    - **max_turns**: `50`
    - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments
@@ -67,7 +67,7 @@ Your only job after delegation is to relay the final summary back to the user.
 You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process views directly**.
 
 ### You MUST NOT:
-- Call `i18n_hardcode_finder` yourself (EXCEPTION: verification agents in Phase 5 may call it)
+- Call `i18n_hardcode_finder` yourself (EXCEPTION: hardcode-sweep and completion-guard agents call it)
 - Call `i18n_convert` yourself
 - Call `file_chunker` or `chunk_reader` yourself
 - Directly edit any PHP view files
@@ -77,7 +77,8 @@ You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process vi
 - Spawn executor agents (via Task tool) to process views in parallel
 - Collect INI entries from executor results
 - Call `ini_builder` yourself (sequentially, never in parallel)
-- After each batch, spawn 4 parallel verification agents (Phase 5) and use their pass/fail results to decide `workflow_translate_review` outcomes
+- After each batch, run per-view hardcode-sweep verification. For ANY view with remaining hardcoded strings, spawn a targeted fix agent and re-verify (retry loop, max 3 attempts per view, escalate to opus on attempt 3)
+- After ALL views processed, run completion-guard agent (opus) for final zero-tolerance verification
 - Call `workflow_translate_view_done` and `workflow_translate_review` yourself based on verification results
 
 ---
@@ -97,13 +98,13 @@ Repeat until all views are processed:
 
 Call `workflow_translate_next_batch(batchSize=4)`.
 
-If response has `complete: true`, go to Step 3 (Finalize).
+If response has `complete: true`, go to Step 3 (Completion Guard).
 
 #### Phase 2 — Spawn Parallel Executors
 
 For each view in the batch, spawn an executor agent using the Task tool:
 
-- **Agent type**: `translation-coder`
+- **Agent type**: `general-purpose`
 - **Model**: `sonnet`
 - **Run in background**: `true` for batches of 2+, `false` for single view (process inline)
 - **max_turns**: `30` for small files (<500 lines, no chunking), `40` for large files (needs chunking)
@@ -136,47 +137,200 @@ After ALL executors in the batch complete:
 
 **NEVER call ini_builder in parallel. Always sequential.**
 
-#### Phase 5 — Verification Suite
+#### Phase 5 — Per-View Enforcement Loop
 
-Spawn 4 verification agents in parallel (single message, all as background tasks):
+After all executors in the batch complete and INI entries are merged, run the enforcement loop for EACH view in the batch:
 
-- **Agent type**: `translation-coder`
+**Step 5a: Hardcode Sweep**
+
+Spawn a hardcode-sweep verification agent:
+- **Agent type**: `translate:hardcode-sweep`
 - **Model**: `sonnet`
 - **max_turns**: `15`
-- **Run in background**: `true`
+- **Run in background**: `false` (process sequentially per view)
+- **Prompt template**:
 
-Each agent receives: the list of view paths from this batch, the component name, target language, source/target INI paths, and its specific verification checklist (see Verification Agent Prompt Templates section).
+```
+Verify this translated view file for remaining hardcoded strings.
 
-The 4 agents are:
-1. **Hardcoded String Verifier** — re-scans each view with `i18n_hardcode_finder`
-2. **JS Safety Verifier** — checks for apostrophe/quote escaping issues in JS contexts
-3. **PHP Integrity Verifier** — runs `php -l`, checks `use` imports and function usage
-4. **i18n Facility Verifier** — validates key naming, placeholder counts, `Text::script()` usage
+filePath: {view.path}
+componentName: {componentName}
 
-**IMPORTANT**: Spawn ALL 4 agents in a single message (parallel tool calls).
-
-#### Phase 6 — Collect Verification & Mark Views
-
-Wait for all 4 verification agents to complete. Each returns JSON:
-```json
-{
-  "results": [
-    {
-      "viewPath": "/path/to/view.php",
-      "passed": true,
-      "issues": []
-    }
-  ]
-}
+Return JSON with passed/failed and findings.
 ```
 
-For each view, aggregate results from all 4 agents:
-- **ALL 4 pass** → `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, [])` + `workflow_translate_review(workflowId, viewPath, passed=true)`
-- **ANY fail** → `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, errors=<aggregated issues>)` + `workflow_translate_review(workflowId, viewPath, passed=false, issues=<aggregated issues>)` — view will be retried in next batch (up to 3 attempts)
+**Step 5b: Handle Sweep Result**
 
-Then loop back to Phase 1 for the next batch.
+Parse the JSON result from hardcode-sweep:
 
-### Step 3: Finalize
+- If `passed === true`:
+  - Call `workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, [])`
+  - Call `workflow_translate_review(workflowId, viewPath, passed=true)`
+  - Move to next view
+
+- If `passed === false`:
+  - Enter the **Fix & Re-verify Loop** (Step 5c)
+
+**Step 5c: Fix & Re-verify Loop**
+
+```
+fix_attempt = 0
+max_fix_attempts = 3
+
+while fix_attempt < max_fix_attempts:
+    fix_attempt++
+
+    # Determine model for fix agent
+    fix_model = "sonnet"
+    if fix_attempt == 3:
+        fix_model = "opus"  # Escalate on final attempt
+
+    # Spawn targeted fix agent with EXACT findings
+    Task(
+      subagent_type="general-purpose",
+      model=fix_model,
+      max_turns=20,
+      prompt="""
+      You are a TARGETED FIX agent. Fix ONLY the specific hardcoded strings listed below.
+
+      ## FILE TO FIX
+      {view.path}
+
+      ## COMPONENT
+      com_{componentName}
+
+      ## EXACT ISSUES TO FIX (from hardcode-sweep)
+      {JSON list of findings from sweep result}
+
+      ## INSTRUCTIONS
+      For EACH finding:
+      1. Read the file at the specified line
+      2. Replace the hardcoded text with Text::_('COM_{COMPONENT}_{TYPE}_{DESCRIPTOR}')
+      3. Ensure `use Joomla\CMS\Language\Text;` import exists
+      4. Run `php -l {view.path}` to validate syntax
+
+      ## RETURN
+      Return ONLY valid JSON:
+      {
+        "viewPath": "{view.path}",
+        "fixed": <number of strings fixed>,
+        "newSourceEntries": [{"key": "COM_X_Y", "value": "English text"}],
+        "newTargetEntries": [{"key": "COM_X_Y", "value": "Translated text"}],
+        "errors": []
+      }
+
+      ## TRANSLATION RULES FOR {targetLanguage}
+      {include same language-specific rules as executor template}
+      """
+    )
+
+    # Merge any new INI entries from fix agent
+    if fix_result has newSourceEntries:
+        ini_builder(action="add", filePath=sourceIniPath, entries=newSourceEntries)
+        ini_builder(action="add", filePath=targetIniPath, entries=newTargetEntries)
+
+    # Re-run hardcode sweep
+    Task(
+      subagent_type="translate:hardcode-sweep",
+      model="sonnet",
+      max_turns=15,
+      prompt="Verify: filePath={view.path}, componentName={componentName}"
+    )
+
+    if sweep_result.passed:
+        # Success! Mark view as done
+        workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, [])
+        workflow_translate_review(workflowId, viewPath, passed=true)
+        break
+
+    if fix_attempt == max_fix_attempts:
+        # All retries exhausted
+        workflow_translate_view_done(workflowId, viewPath, stringsFound, stringsConverted, sweep_result.findings)
+        workflow_translate_review(workflowId, viewPath, passed=false, issues=sweep_result.findings)
+        # Log for manual fix
+```
+
+After processing all views in the batch, loop back to Phase 1 for the next batch.
+
+### Step 3: Completion Guard
+
+Before finalizing, run the completion guard agent (opus) to verify ALL translated files:
+
+```
+Task(
+  subagent_type="translate:completion-guard",
+  model="opus",
+  max_turns=30,
+  prompt="""
+  Final verification of ALL translated files.
+
+  viewPaths: {list of ALL view paths}
+  componentPath: {componentPath}
+  componentName: {componentName}
+  targetLanguage: {targetLanguage}
+  sourceIniPath: {sourceIniPath}
+  targetIniPath: {targetIniPath}
+  """
+)
+```
+
+**Handle Completion Guard Result:**
+
+```
+guard_attempt = 0
+max_guard_attempts = 3
+
+while guard_attempt < max_guard_attempts:
+    guard_attempt++
+
+    # Run completion guard
+    Task(
+      subagent_type="translate:completion-guard",
+      model="opus",
+      max_turns=30,
+      prompt="""
+      Final verification of ALL translated files.
+
+      viewPaths: {list of ALL view paths}
+      componentPath: {componentPath}
+      componentName: {componentName}
+      targetLanguage: {targetLanguage}
+      sourceIniPath: {sourceIniPath}
+      targetIniPath: {targetIniPath}
+      """
+    )
+
+    if guard_result.approved:
+        workflow_translate_gate_update(workflowId, "completion_guard", "passed")
+        break
+
+    if guard_attempt < max_guard_attempts:
+        # Fix issues and retry
+        Task(
+          subagent_type="general-purpose",
+          model="opus",
+          max_turns=25,
+          prompt="""
+          Fix ALL remaining hardcoded strings found by the completion guard.
+
+          Issues: {guard_result.issues}
+
+          For each issue, fix the hardcoded text in the file, add INI entries,
+          validate PHP syntax.
+
+          Return JSON with fixed count and new INI entries.
+          """
+        )
+
+        # Merge any new INI entries
+
+if NOT approved after max_guard_attempts:
+    Log for manual intervention
+```
+
+Then proceed to Step 4 (Finalize).
+
+### Step 4: Finalize
 
 1. Call `i18n_verify(componentPath, targetLanguage)` to validate INI key completeness across the whole component
 2. Note any missing keys or orphan keys from the verification result
@@ -205,15 +359,16 @@ INI FILE UPDATES
 
 VERIFICATION RESULTS
 ----------------------------------------------------------------
-  Hardcoded Strings:  {N} views clean, {N} failed
-  JS Safety:          {N} views clean, {N} failed
-  PHP Integrity:      {N} views clean, {N} failed
-  i18n Facilities:    {N} views clean, {N} failed
+  Per-view hardcode sweeps: {N} passed, {N} failed (retried)
+  Completion guard: {passed/rejected}
+  Final approval: {yes/no}
 
-RETRIES
+RETRIES & ESCALATIONS
 ----------------------------------------------------------------
   Views retried: {N}
+  Escalated to opus: {N}
   Max attempts reached: {N} (manual fix needed)
+  Completion guard cycles: {N}
 
 WARNINGS (from i18n_verify)
 ----------------------------------------------------------------
@@ -323,152 +478,6 @@ Your final message MUST be valid JSON (and ONLY JSON, no other text):
 
 ---
 
-## Verification Agent Prompt Templates
-
-Use these templates when spawning the 4 verification agents in Phase 5. Replace all `{placeholders}`.
-
-### Agent 1: Hardcoded String Verifier
-
-```
-You are a verification agent. Check for remaining hardcoded strings in translated view files.
-
-## FILES TO VERIFY
-{list of viewPaths from batch, one per line}
-
-## COMPONENT INFO
-- Component: com_{componentName}
-- Target language: {targetLanguage}
-- Source INI: {sourceIniPath}
-- Target INI: {targetIniPath}
-
-## YOUR CHECKS
-
-For EACH view file listed above:
-1. Call i18n_hardcode_finder(filePath=viewPath)
-2. If summary.total === 0 → PASS
-3. If summary.total > 0 → FAIL (report the texts and line numbers)
-
-## OUTPUT
-
-Return ONLY valid JSON (no other text):
-{
-  "results": [
-    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
-    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Line 42: 'Save Changes' still hardcoded", "Line 87: 'Delete' still hardcoded"]}
-  ]
-}
-```
-
-### Agent 2: JS Safety Verifier
-
-```
-You are a verification agent. Check for JavaScript apostrophe/quote escaping issues in translated view files.
-
-## FILES TO VERIFY
-{list of viewPaths from batch, one per line}
-
-## COMPONENT INFO
-- Component: com_{componentName}
-- Target language: {targetLanguage}
-- Source INI: {sourceIniPath}
-- Target INI: {targetIniPath}
-
-## YOUR CHECKS
-
-For EACH view file listed above, Read the file and check:
-1. Any Joomla.Text._() or Joomla.JText._() calls where the corresponding INI value contains unescaped apostrophes or quotes
-2. Inline JS strings containing Text::_() inside single quotes (e.g., var x = '<?php echo Text::_("KEY"); ?>')
-3. JS context strings should use Text::script() registration or echo into a data attribute, not direct echo into JS string literals
-4. Read the target INI file and check: any values containing ' (apostrophe) that are used in JS-context keys
-
-If no JS escaping risks found → PASS
-If any issues → FAIL (report which keys/lines have unsafe values)
-
-## OUTPUT
-
-Return ONLY valid JSON (no other text):
-{
-  "results": [
-    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
-    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Line 55: Text::_('COM_FOO_TITLE') echoed inside JS single-quoted string", "Key COM_FOO_MSG has apostrophe in INI value used in JS context"]}
-  ]
-}
-```
-
-### Agent 3: PHP Integrity Verifier
-
-```
-You are a verification agent. Check PHP syntax, imports, and function usage in translated view files.
-
-## FILES TO VERIFY
-{list of viewPaths from batch, one per line}
-
-## COMPONENT INFO
-- Component: com_{componentName}
-- Target language: {targetLanguage}
-- Source INI: {sourceIniPath}
-- Target INI: {targetIniPath}
-
-## YOUR CHECKS
-
-For EACH view file listed above:
-1. Run `php -l {viewPath}` — must pass with no syntax errors
-2. If the file uses `Text::_` or `Text::sprintf`, verify that `use Joomla\CMS\Language\Text;` exists in the file (or `use Joomla\CMS\Language\Text as Text;`). If the file uses `JText::_` instead, that is also acceptable (Joomla 3 compat)
-3. Check for concatenation anti-patterns: `Text::_('KEY') . $var` should be `Text::sprintf('KEY_WITH_VAR', $var)`
-4. Check that `Text::_()` is not called with sprintf-style placeholders in the INI value (should use `Text::sprintf()` instead)
-
-If all checks pass → PASS
-If any issue → FAIL (report specific issues per view)
-
-## OUTPUT
-
-Return ONLY valid JSON (no other text):
-{
-  "results": [
-    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
-    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["PHP syntax error on line 23", "Missing 'use Joomla\\CMS\\Language\\Text;' import", "Line 45: Text::_('KEY') concatenated with $var — use Text::sprintf instead"]}
-  ]
-}
-```
-
-### Agent 4: i18n Facility Verifier
-
-```
-You are a verification agent. Check i18n key naming, placeholder counts, and Text::script() usage in translated view files.
-
-## FILES TO VERIFY
-{list of viewPaths from batch, one per line}
-
-## COMPONENT INFO
-- Component: com_{componentName}
-- Target language: {targetLanguage}
-- Source INI: {sourceIniPath}
-- Target INI: {targetIniPath}
-
-## YOUR CHECKS
-
-For EACH view file listed above, Read the file and check:
-1. All Text::_('KEY') keys match the expected naming convention COM_{COMPONENT}_{TYPE}_{DESCRIPTOR} (uppercase, underscores only)
-2. No duplicate keys generated — same key should not be used for different English texts (cross-reference with source INI file)
-3. Text::sprintf() calls have matching placeholder counts: count %s/%d/%1$s in the INI value vs arguments passed to sprintf
-4. Language strings used in <script> blocks or JS event handlers (onclick, onchange, etc.) are registered via Text::script('KEY') in PHP, not echoed directly
-
-If all checks pass → PASS
-If any issue → FAIL (report mismatches)
-
-## OUTPUT
-
-Return ONLY valid JSON (no other text):
-{
-  "results": [
-    {"viewPath": "/path/to/view.php", "passed": true, "issues": []},
-    {"viewPath": "/path/to/other.php", "passed": false, "issues": ["Key COM_FOO_X does not follow naming convention", "Line 78: Text::sprintf with 2 args but INI value has 1 placeholder", "Line 92: Text::_('KEY') used in onclick handler — should use Text::script()"]}
-  ]
-}
-```
-
----
-
 ## Edge Cases
 
 ### Single View Remaining
@@ -519,7 +528,10 @@ When reading executor results via `TaskOutput`:
 | Orchestrator | 50 | Always |
 | Executor (small) | 30 | File <500 lines, no chunking (+5 for self-verify loop) |
 | Executor (large) | 40 | File needs chunking (+5 for self-verify loop) |
-| Verification agent | 15 | Lightweight read-only checks |
+| Hardcode sweep | 15 | Per-view verification |
+| Targeted fix | 20 | Fix specific findings from sweep |
+| Targeted fix (opus) | 20 | Escalated fix on 3rd attempt |
+| Completion guard | 30 | Final opus verification of ALL files |
 
 ---
 

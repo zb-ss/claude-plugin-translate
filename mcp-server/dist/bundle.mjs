@@ -17832,9 +17832,6 @@ function generateReplacement(original, key, type, framework) {
       case "paragraph":
       case "span_text":
       case "inline_text":
-        if (original.includes("<?php") || original.includes("<?=")) {
-          return original.replace(/>([^<]+)</, `><?php echo Text::_('${key}'); ?><`);
-        }
         return original.replace(/>([^<]+)</, `><?php echo Text::_('${key}'); ?><`);
       case "placeholder":
         return original.replace(/placeholder="[^"]*"/, `placeholder="<?php echo Text::_('${key}'); ?>"`);
@@ -18294,6 +18291,105 @@ var hardcodePatterns = [
     textGroup: 1,
     confidence: 0.98,
     exclude: [/Text::_/, /JText::_/, /<\?php/]
+  },
+  // NEW PHP PATTERNS
+  {
+    regex: /echo\s+["']([A-Z][^"']{3,60})["']\s*;/gi,
+    type: "message",
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/, /\$this->/, /sprintf/, /htmlspecialchars/]
+  },
+  {
+    regex: /\?\s*["']([A-Z][a-zA-Z\s]{2,25})["']\s*:\s*["']([A-Z][a-zA-Z\s]{2,25})["']/g,
+    type: "inline_text",
+    textGroup: 1,
+    confidence: 0.95,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /enqueueMessage\s*\(\s*["']([A-Z][^"']{5,100})["']/gi,
+    type: "message",
+    textGroup: 1,
+    confidence: 0.98,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /sprintf\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message",
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/, /Text::sprintf/]
+  },
+  {
+    regex: /ToolbarHelper::title\s*\(\s*["']([A-Z][^"']{3,60})["']/gi,
+    type: "heading",
+    textGroup: 1,
+    confidence: 0.98,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\?>\s*([A-Z][a-zA-Z\s,:!?.]{3,60})\s*<\?php/g,
+    type: "inline_text",
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/^\s*$/, /^[{}()<>]+$/]
+  },
+  {
+    regex: />([A-Z][a-zA-Z\s]{2,30}):\s*<\?(?:php|=)/g,
+    type: "label",
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\.(?:html|text)\s*\(\s*["']([A-Z][^"']{3,60})["']\s*\)/gi,
+    type: "js_string",
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Joomla\.JText/, /Joomla\.Text/]
+  },
+  {
+    regex: /data-(?:confirm|message|alert|prompt)="([A-Z][^"]{5,80})"/gi,
+    type: "data_attribute",
+    textGroup: 1,
+    confidence: 0.95,
+    exclude: [/Text::_/, /JText::_/, /<\?php/]
+  },
+  {
+    regex: /<input[^>]*type="(?:text|search)"[^>]*value="([A-Z][^"]{2,30})"[^>]*>/gi,
+    type: "button",
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/, /<\?php/, /\$/, /\{\{/]
+  },
+  {
+    regex: /HTMLHelper::_\s*\([^,]+,\s*[^,]+,\s*["']([A-Z][^"']{2,40})["']/gi,
+    type: "option",
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /throw\s+new\s+\\?(?:Runtime|Invalid|Logic)?Exception\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message",
+    textGroup: 1,
+    confidence: 0.75,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\?>\s*([a-zA-Z][^<]{2,40})<\//g,
+    type: "inline_text",
+    textGroup: 1,
+    confidence: 0.8,
+    exclude: [/^\s*$/, /^[{}()<>]+$/, /^\s*;/, /^\s*\)/]
+  },
+  {
+    regex: /->set(?:Description|Label|Title)\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message",
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/]
   }
 ];
 var skipPatterns = [
@@ -18547,22 +18643,13 @@ async function execute(args) {
       return a.line - b.line;
     return b.confidence - a.confidence;
   });
-  const deduped = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const h of hardcoded) {
-    const key = `${h.line}:${h.text}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(h);
-    }
-  }
   const byType = {};
-  for (const h of deduped) {
+  for (const h of hardcoded) {
     byType[h.type] = (byType[h.type] || 0) + 1;
   }
-  const highConfidence = deduped.filter((h) => h.confidence >= 0.9);
-  const mediumConfidence = deduped.filter((h) => h.confidence >= 0.7 && h.confidence < 0.9);
-  const lowConfidence = deduped.filter((h) => h.confidence < 0.7);
+  const highConfidence = hardcoded.filter((h) => h.confidence >= 0.9);
+  const mediumConfidence = hardcoded.filter((h) => h.confidence >= 0.7 && h.confidence < 0.9);
+  const lowConfidence = hardcoded.filter((h) => h.confidence < 0.7);
   return JSON.stringify({
     success: true,
     filePath,
@@ -18573,9 +18660,9 @@ async function execute(args) {
       end: endLine ?? allLines.length,
       linesProcessed: linesToProcess.length
     },
-    hardcoded: deduped,
+    hardcoded,
     summary: {
-      total: deduped.length,
+      total: hardcoded.length,
       byType,
       highConfidence: highConfidence.length,
       mediumConfidence: mediumConfidence.length,
@@ -19912,8 +19999,9 @@ var i18nVerifyTool = {
 // dist/tools/workflow.js
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync } from "fs";
 import { join as join2, basename as basename5, dirname as dirname3 } from "path";
+import { homedir } from "os";
 function getWorkflowDir() {
-  const home = process.env.HOME || "~";
+  const home = process.env.HOME || homedir();
   return join2(home, ".claude/workflows/translate");
 }
 function getWorkflowStatePath(workflowId) {
@@ -20002,6 +20090,22 @@ function findLanguageFile(componentPath, componentName, lang) {
   }
   return possiblePaths[0];
 }
+function buildChunkingInstructions(view) {
+  return view.needsChunking ? {
+    required: true,
+    reason: `File has ${view.lines} lines (>500), MUST use chunking`,
+    steps: [
+      `1. file_chunker(filePath="${view.path}", chunkSize=150, overlap=20)`,
+      `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${view.path}", startLine=X, endLine=Y)`,
+      `3. Combine all findings, remove duplicates from overlaps`,
+      `4. Convert ALL strings found with i18n_convert`,
+      `5. DO NOT skip or defer this file - process it completely`
+    ]
+  } : {
+    required: false,
+    reason: `File has ${view.lines} lines (<500), can process directly`
+  };
+}
 var workflowInitSchema = external_exports.object({
   componentPath: external_exports.string().describe("Absolute path to the Joomla component"),
   targetLanguage: external_exports.string().describe("Target language code (e.g., fr-CA)"),
@@ -20046,7 +20150,11 @@ async function executeWorkflowInit(args) {
     currentViewIndex: 0,
     views,
     totalStringsConverted: 0,
-    totalErrors: 0
+    totalErrors: 0,
+    gates: {
+      hardcode_sweep: { status: "pending", iteration: 0 },
+      completion_guard: { status: "pending", iteration: 0 }
+    }
   };
   saveWorkflowState(state);
   return JSON.stringify({
@@ -20096,7 +20204,7 @@ async function executeWorkflowNext(args) {
   if (!nextView) {
     const allDone = state.views.every((v) => v.status === "done");
     if (allDone) {
-      state.status = "complete";
+      state.status = "verification";
       saveWorkflowState(state);
       return JSON.stringify({
         success: true,
@@ -20115,20 +20223,7 @@ async function executeWorkflowNext(args) {
   nextView.attempts++;
   state.currentViewIndex = state.views.indexOf(nextView);
   saveWorkflowState(state);
-  const chunkingInstructions = nextView.needsChunking ? {
-    required: true,
-    reason: `File has ${nextView.lines} lines (>500), MUST use chunking`,
-    steps: [
-      `1. file_chunker(filePath="${nextView.path}", chunkSize=150, overlap=20)`,
-      `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${nextView.path}", startLine=X, endLine=Y)`,
-      `3. Combine all findings, remove duplicates from overlaps`,
-      `4. Convert ALL strings found with i18n_convert`,
-      `5. DO NOT skip or defer this file - process it completely`
-    ]
-  } : {
-    required: false,
-    reason: `File has ${nextView.lines} lines (<500), can process directly`
-  };
+  const chunkingInstructions = buildChunkingInstructions(nextView);
   const explicitInstructions = [
     "========================================",
     "MANDATORY TARGET FILE - NO SUBSTITUTIONS",
@@ -20205,7 +20300,7 @@ async function executeWorkflowNextBatch(args) {
   if (pendingViews.length === 0) {
     const allDone = state.views.every((v) => v.status === "done");
     if (allDone) {
-      state.status = "complete";
+      state.status = "verification";
       saveWorkflowState(state);
       return JSON.stringify({
         success: true,
@@ -20227,31 +20322,15 @@ async function executeWorkflowNextBatch(args) {
     view.attempts++;
   }
   saveWorkflowState(state);
-  const batchViews = batch.map((view) => {
-    const chunkingInstructions = view.needsChunking ? {
-      required: true,
-      reason: `File has ${view.lines} lines (>500), MUST use chunking`,
-      steps: [
-        `1. file_chunker(filePath="${view.path}", chunkSize=150, overlap=20)`,
-        `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${view.path}", startLine=X, endLine=Y)`,
-        `3. Combine all findings, remove duplicates from overlaps`,
-        `4. Convert ALL strings found with i18n_convert`,
-        `5. DO NOT skip or defer this file - process it completely`
-      ]
-    } : {
-      required: false,
-      reason: `File has ${view.lines} lines (<500), can process directly`
-    };
-    return {
-      path: view.path,
-      relativePath: view.relativePath,
-      lines: view.lines,
-      needsChunking: view.needsChunking,
-      attempt: view.attempts,
-      previousErrors: view.errors,
-      chunking: chunkingInstructions
-    };
-  });
+  const batchViews = batch.map((view) => ({
+    path: view.path,
+    relativePath: view.relativePath,
+    lines: view.lines,
+    needsChunking: view.needsChunking,
+    attempt: view.attempts,
+    previousErrors: view.errors,
+    chunking: buildChunkingInstructions(view)
+  }));
   const done = state.views.filter((v) => v.status === "done").length;
   return JSON.stringify({
     success: true,
@@ -20394,7 +20473,7 @@ async function executeWorkflowReview(args) {
     const remaining = state.views.filter((v) => v.status !== "done").length;
     const allDone = remaining === 0;
     if (allDone) {
-      state.status = "complete";
+      state.status = "verification";
       saveWorkflowState(state);
     }
     return JSON.stringify({
@@ -20506,6 +20585,52 @@ var workflowStatusTool = {
   },
   execute: executeWorkflowStatus
 };
+var workflowGateUpdateSchema = external_exports.object({
+  workflowId: external_exports.string().describe("Workflow ID"),
+  gateName: external_exports.enum(["hardcode_sweep", "completion_guard"]).describe("Gate to update"),
+  status: external_exports.enum(["pending", "passed", "failed"]).describe("New status")
+});
+async function executeWorkflowGateUpdate(args) {
+  const state = loadWorkflowState(args.workflowId);
+  if (!state) {
+    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` });
+  }
+  if (!state.gates) {
+    state.gates = {
+      hardcode_sweep: { status: "pending", iteration: 0 },
+      completion_guard: { status: "pending", iteration: 0 }
+    };
+  }
+  const gate = state.gates[args.gateName];
+  state.gates[args.gateName] = {
+    status: args.status,
+    iteration: (gate?.iteration || 0) + 1
+  };
+  if (args.gateName === "completion_guard" && args.status === "passed") {
+    state.status = "complete";
+  }
+  saveWorkflowState(state);
+  return JSON.stringify({
+    success: true,
+    gate: args.gateName,
+    status: args.status,
+    iteration: state.gates[args.gateName].iteration
+  });
+}
+var workflowGateUpdateTool = {
+  name: "workflow_translate_gate_update",
+  description: "Update a quality gate status in the translation workflow. Used by orchestrator after verification passes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      workflowId: { type: "string", description: "Workflow ID" },
+      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard"], description: "Gate to update" },
+      status: { type: "string", enum: ["pending", "passed", "failed"], description: "New status" }
+    },
+    required: ["workflowId", "gateName", "status"]
+  },
+  execute: executeWorkflowGateUpdate
+};
 
 // dist/index.js
 var tools = [
@@ -20522,7 +20647,8 @@ var tools = [
   workflowNextBatchTool,
   workflowViewDoneTool,
   workflowReviewTool,
-  workflowStatusTool
+  workflowStatusTool,
+  workflowGateUpdateTool
 ];
 var toolMap = new Map(tools.map((tool) => [tool.name, tool]));
 var server = new Server({

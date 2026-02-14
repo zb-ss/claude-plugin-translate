@@ -1,7 +1,7 @@
 {
   "name": "translate",
   "description": "Joomla translation workflow commands with MCP tools",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "mcpServers": {
     "translate": {
       "command": "node",
@@ -27,6 +27,17 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/approve-bash.sh",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-guard.js\"",
+            "timeout": 5
           }
         ]
       }

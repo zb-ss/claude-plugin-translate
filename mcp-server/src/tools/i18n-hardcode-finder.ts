@@ -110,9 +110,6 @@ function generateReplacement(original: string, key: string, type: string, framew
       case "paragraph":
       case "span_text":
       case "inline_text":
-        if (original.includes("<?php") || original.includes("<?=")) {
-          return original.replace(/>([^<]+)</, `><?php echo Text::_('${key}'); ?><`)
-        }
         return original.replace(/>([^<]+)</, `><?php echo Text::_('${key}'); ?><`)
 
       case "placeholder":
@@ -590,6 +587,106 @@ const hardcodePatterns = [
     textGroup: 1,
     confidence: 0.98,
     exclude: [/Text::_/, /JText::_/, /<\?php/]
+  },
+
+  // NEW PHP PATTERNS
+  {
+    regex: /echo\s+["']([A-Z][^"']{3,60})["']\s*;/gi,
+    type: "message" as const,
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/, /\$this->/, /sprintf/, /htmlspecialchars/]
+  },
+  {
+    regex: /\?\s*["']([A-Z][a-zA-Z\s]{2,25})["']\s*:\s*["']([A-Z][a-zA-Z\s]{2,25})["']/g,
+    type: "inline_text" as const,
+    textGroup: 1,
+    confidence: 0.95,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /enqueueMessage\s*\(\s*["']([A-Z][^"']{5,100})["']/gi,
+    type: "message" as const,
+    textGroup: 1,
+    confidence: 0.98,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /sprintf\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message" as const,
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/, /Text::sprintf/]
+  },
+  {
+    regex: /ToolbarHelper::title\s*\(\s*["']([A-Z][^"']{3,60})["']/gi,
+    type: "heading" as const,
+    textGroup: 1,
+    confidence: 0.98,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\?>\s*([A-Z][a-zA-Z\s,:!?.]{3,60})\s*<\?php/g,
+    type: "inline_text" as const,
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/^\s*$/, /^[{}()<>]+$/]
+  },
+  {
+    regex: />([A-Z][a-zA-Z\s]{2,30}):\s*<\?(?:php|=)/g,
+    type: "label" as const,
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\.(?:html|text)\s*\(\s*["']([A-Z][^"']{3,60})["']\s*\)/gi,
+    type: "js_string" as const,
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Joomla\.JText/, /Joomla\.Text/]
+  },
+  {
+    regex: /data-(?:confirm|message|alert|prompt)="([A-Z][^"]{5,80})"/gi,
+    type: "data_attribute" as const,
+    textGroup: 1,
+    confidence: 0.95,
+    exclude: [/Text::_/, /JText::_/, /<\?php/]
+  },
+  {
+    regex: /<input[^>]*type="(?:text|search)"[^>]*value="([A-Z][^"]{2,30})"[^>]*>/gi,
+    type: "button" as const,
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/, /<\?php/, /\$/, /\{\{/]
+  },
+  {
+    regex: /HTMLHelper::_\s*\([^,]+,\s*[^,]+,\s*["']([A-Z][^"']{2,40})["']/gi,
+    type: "option" as const,
+    textGroup: 1,
+    confidence: 0.85,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /throw\s+new\s+\\?(?:Runtime|Invalid|Logic)?Exception\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message" as const,
+    textGroup: 1,
+    confidence: 0.75,
+    exclude: [/Text::_/, /JText::_/]
+  },
+  {
+    regex: /\?>\s*([a-zA-Z][^<]{2,40})<\//g,
+    type: "inline_text" as const,
+    textGroup: 1,
+    confidence: 0.8,
+    exclude: [/^\s*$/, /^[{}()<>]+$/, /^\s*;/, /^\s*\)/]
+  },
+  {
+    regex: /->set(?:Description|Label|Title)\s*\(\s*["']([A-Z][^"']{5,80})["']/gi,
+    type: "message" as const,
+    textGroup: 1,
+    confidence: 0.9,
+    exclude: [/Text::_/, /JText::_/]
   }
 ]
 
@@ -828,24 +925,14 @@ export async function execute(args: I18nHardcodeFinderArgs): Promise<string> {
     return b.confidence - a.confidence
   })
 
-  const deduped: HardcodedString[] = []
-  const seen = new Set<string>()
-  for (const h of hardcoded) {
-    const key = `${h.line}:${h.text}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      deduped.push(h)
-    }
-  }
-
   const byType: Record<string, number> = {}
-  for (const h of deduped) {
+  for (const h of hardcoded) {
     byType[h.type] = (byType[h.type] || 0) + 1
   }
 
-  const highConfidence = deduped.filter(h => h.confidence >= 0.9)
-  const mediumConfidence = deduped.filter(h => h.confidence >= 0.7 && h.confidence < 0.9)
-  const lowConfidence = deduped.filter(h => h.confidence < 0.7)
+  const highConfidence = hardcoded.filter(h => h.confidence >= 0.9)
+  const mediumConfidence = hardcoded.filter(h => h.confidence >= 0.7 && h.confidence < 0.9)
+  const lowConfidence = hardcoded.filter(h => h.confidence < 0.7)
 
   return JSON.stringify({
     success: true,
@@ -857,9 +944,9 @@ export async function execute(args: I18nHardcodeFinderArgs): Promise<string> {
       end: endLine ?? allLines.length,
       linesProcessed: linesToProcess.length
     },
-    hardcoded: deduped,
+    hardcoded,
     summary: {
-      total: deduped.length,
+      total: hardcoded.length,
       byType,
       highConfidence: highConfidence.length,
       mediumConfidence: mediumConfidence.length,
