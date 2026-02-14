@@ -39,16 +39,22 @@ interface WorkflowState {
   targetIniPath: string
   created: string
   updated: string
-  status: "scanning" | "processing" | "complete" | "error"
+  status: "scanning" | "processing" | "verification" | "complete" | "error"
   currentViewIndex: number
   views: ViewInfo[]
   totalStringsConverted: number
   totalErrors: number
+  gates?: {
+    hardcode_sweep: { status: 'pending' | 'passed' | 'failed'; iteration: number }
+    completion_guard: { status: 'pending' | 'passed' | 'failed'; iteration: number }
+  }
 }
 
 // Helper functions
+import { homedir } from "os"
+
 function getWorkflowDir(): string {
-  const home = process.env.HOME || "~"
+  const home = process.env.HOME || homedir()
   return join(home, ".claude/workflows/translate")
 }
 
@@ -160,6 +166,23 @@ function findLanguageFile(componentPath: string, componentName: string, lang: st
   return possiblePaths[0]
 }
 
+function buildChunkingInstructions(view: ViewInfo) {
+  return view.needsChunking ? {
+    required: true,
+    reason: `File has ${view.lines} lines (>500), MUST use chunking`,
+    steps: [
+      `1. file_chunker(filePath="${view.path}", chunkSize=150, overlap=20)`,
+      `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${view.path}", startLine=X, endLine=Y)`,
+      `3. Combine all findings, remove duplicates from overlaps`,
+      `4. Convert ALL strings found with i18n_convert`,
+      `5. DO NOT skip or defer this file - process it completely`
+    ]
+  } : {
+    required: false,
+    reason: `File has ${view.lines} lines (<500), can process directly`
+  }
+}
+
 // ============================================
 // Workflow Init Tool
 // ============================================
@@ -216,7 +239,11 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
     currentViewIndex: 0,
     views,
     totalStringsConverted: 0,
-    totalErrors: 0
+    totalErrors: 0,
+    gates: {
+      hardcode_sweep: { status: 'pending', iteration: 0 },
+      completion_guard: { status: 'pending', iteration: 0 },
+    },
   }
 
   saveWorkflowState(state)
@@ -280,7 +307,7 @@ export async function executeWorkflowNext(args: WorkflowNextArgs): Promise<strin
   if (!nextView) {
     const allDone = state.views.every(v => v.status === "done")
     if (allDone) {
-      state.status = "complete"
+      state.status = "verification"
       saveWorkflowState(state)
       return JSON.stringify({
         success: true,
@@ -301,20 +328,7 @@ export async function executeWorkflowNext(args: WorkflowNextArgs): Promise<strin
   state.currentViewIndex = state.views.indexOf(nextView)
   saveWorkflowState(state)
 
-  const chunkingInstructions = nextView.needsChunking ? {
-    required: true,
-    reason: `File has ${nextView.lines} lines (>500), MUST use chunking`,
-    steps: [
-      `1. file_chunker(filePath="${nextView.path}", chunkSize=150, overlap=20)`,
-      `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${nextView.path}", startLine=X, endLine=Y)`,
-      `3. Combine all findings, remove duplicates from overlaps`,
-      `4. Convert ALL strings found with i18n_convert`,
-      `5. DO NOT skip or defer this file - process it completely`
-    ]
-  } : {
-    required: false,
-    reason: `File has ${nextView.lines} lines (<500), can process directly`
-  }
+  const chunkingInstructions = buildChunkingInstructions(nextView)
 
   const explicitInstructions = [
     "========================================",
@@ -407,7 +421,7 @@ export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Pro
   if (pendingViews.length === 0) {
     const allDone = state.views.every(v => v.status === "done")
     if (allDone) {
-      state.status = "complete"
+      state.status = "verification"
       saveWorkflowState(state)
       return JSON.stringify({
         success: true,
@@ -433,32 +447,15 @@ export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Pro
   }
   saveWorkflowState(state)
 
-  const batchViews = batch.map(view => {
-    const chunkingInstructions = view.needsChunking ? {
-      required: true,
-      reason: `File has ${view.lines} lines (>500), MUST use chunking`,
-      steps: [
-        `1. file_chunker(filePath="${view.path}", chunkSize=150, overlap=20)`,
-        `2. For EACH chunk (1 to N): i18n_hardcode_finder(filePath="${view.path}", startLine=X, endLine=Y)`,
-        `3. Combine all findings, remove duplicates from overlaps`,
-        `4. Convert ALL strings found with i18n_convert`,
-        `5. DO NOT skip or defer this file - process it completely`
-      ]
-    } : {
-      required: false,
-      reason: `File has ${view.lines} lines (<500), can process directly`
-    }
-
-    return {
-      path: view.path,
-      relativePath: view.relativePath,
-      lines: view.lines,
-      needsChunking: view.needsChunking,
-      attempt: view.attempts,
-      previousErrors: view.errors,
-      chunking: chunkingInstructions
-    }
-  })
+  const batchViews = batch.map(view => ({
+    path: view.path,
+    relativePath: view.relativePath,
+    lines: view.lines,
+    needsChunking: view.needsChunking,
+    attempt: view.attempts,
+    previousErrors: view.errors,
+    chunking: buildChunkingInstructions(view)
+  }))
 
   const done = state.views.filter(v => v.status === "done").length
 
@@ -637,7 +634,7 @@ export async function executeWorkflowReview(args: WorkflowReviewArgs): Promise<s
     const allDone = remaining === 0
 
     if (allDone) {
-      state.status = "complete"
+      state.status = "verification"
       saveWorkflowState(state)
     }
 
@@ -768,4 +765,65 @@ export const workflowStatusTool = {
     required: []
   },
   execute: executeWorkflowStatus
+}
+
+// ============================================
+// Workflow Gate Update Tool
+// ============================================
+
+export const workflowGateUpdateSchema = z.object({
+  workflowId: z.string().describe("Workflow ID"),
+  gateName: z.enum(['hardcode_sweep', 'completion_guard']).describe("Gate to update"),
+  status: z.enum(['pending', 'passed', 'failed']).describe("New status"),
+})
+
+export type WorkflowGateUpdateArgs = z.infer<typeof workflowGateUpdateSchema>
+
+export async function executeWorkflowGateUpdate(args: WorkflowGateUpdateArgs): Promise<string> {
+  const state = loadWorkflowState(args.workflowId)
+  if (!state) {
+    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` })
+  }
+
+  if (!state.gates) {
+    state.gates = {
+      hardcode_sweep: { status: 'pending', iteration: 0 },
+      completion_guard: { status: 'pending', iteration: 0 },
+    }
+  }
+
+  const gate = state.gates[args.gateName]
+  state.gates[args.gateName] = {
+    status: args.status,
+    iteration: (gate?.iteration || 0) + 1,
+  }
+
+  // If completion guard passes, set workflow status to complete
+  if (args.gateName === 'completion_guard' && args.status === 'passed') {
+    state.status = 'complete'
+  }
+
+  saveWorkflowState(state)
+
+  return JSON.stringify({
+    success: true,
+    gate: args.gateName,
+    status: args.status,
+    iteration: state.gates[args.gateName].iteration,
+  })
+}
+
+export const workflowGateUpdateTool = {
+  name: "workflow_translate_gate_update",
+  description: "Update a quality gate status in the translation workflow. Used by orchestrator after verification passes.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      workflowId: { type: "string", description: "Workflow ID" },
+      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard"], description: "Gate to update" },
+      status: { type: "string", enum: ["pending", "passed", "failed"], description: "New status" },
+    },
+    required: ["workflowId", "gateName", "status"]
+  },
+  execute: executeWorkflowGateUpdate
 }

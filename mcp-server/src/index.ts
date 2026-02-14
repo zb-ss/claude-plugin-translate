@@ -32,7 +32,8 @@ import {
   workflowNextBatchTool,
   workflowViewDoneTool,
   workflowReviewTool,
-  workflowStatusTool
+  workflowStatusTool,
+  workflowGateUpdateTool
 } from "./tools/workflow.js"
 
 // Collect all tools
@@ -50,7 +51,8 @@ const tools = [
   workflowNextBatchTool,
   workflowViewDoneTool,
   workflowReviewTool,
-  workflowStatusTool
+  workflowStatusTool,
+  workflowGateUpdateTool
 ]
 
 // Create a map for quick tool lookup
