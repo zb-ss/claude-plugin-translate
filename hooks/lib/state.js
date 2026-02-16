@@ -10,14 +10,39 @@ const os = require('os');
 const TRANSLATE_DIR = path.join(os.homedir(), '.claude', 'workflows', 'translate');
 
 /**
- * Validate that a file path is within the translate workflow directory.
+ * Validate a file path to prevent traversal attacks.
+ * Only allows paths under ~/.claude/workflows/translate/ or os.tmpdir().
  */
 function validatePath(filePath) {
-  const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(TRANSLATE_DIR)) {
-    throw new Error(`Path ${filePath} is outside translate workflow directory`);
+  if (!filePath || typeof filePath !== 'string') return null;
+
+  const dangerousPatterns = [
+    /\.\.[\/\\]/,
+    /[<>|"'`$(){}]/,
+    /\0/,
+    /^[\/\\]{2}/,
+  ];
+
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(filePath)) return null;
   }
-  return resolved;
+
+  try {
+    const resolved = path.resolve(filePath);
+    const allowedRoots = [
+      path.resolve(TRANSLATE_DIR),
+      path.resolve(os.tmpdir()),
+    ];
+
+    const isAllowed = allowedRoots.some(root => {
+      const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
+      return resolved === root || resolved.startsWith(normalizedRoot);
+    });
+
+    return isAllowed ? resolved : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -40,6 +65,7 @@ function getActiveTranslateWorkflow() {
 
     for (const dir of dirs) {
       const statePath = validatePath(path.join(TRANSLATE_DIR, dir, 'workflow-state.json'));
+      if (!statePath) continue;
       try {
         const content = fs.readFileSync(statePath, 'utf8');
         const state = JSON.parse(content);
@@ -100,9 +126,112 @@ function getViewCounts(state) {
   };
 }
 
+/**
+ * Write a session marker file so hooks can discover the session_id.
+ * Writes /tmp/translate-session-marker-{sessionId}.json.
+ */
+function writeSessionMarker(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return false;
+  const markerPath = path.join(os.tmpdir(), `translate-session-marker-${sessionId}.json`);
+  try {
+    const content = JSON.stringify({ session_id: sessionId, timestamp: new Date().toISOString() }) + '\n';
+    fs.writeFileSync(markerPath, content, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bind a session to a specific translate workflow.
+ * Writes /tmp/translate-binding-{sessionId}.json.
+ */
+function bindSessionToWorkflow(sessionId, workflowPath, workflowId) {
+  if (!sessionId || !workflowPath) return false;
+  const bindingPath = path.join(os.tmpdir(), `translate-binding-${sessionId}.json`);
+  try {
+    const content = JSON.stringify({
+      session_id: sessionId,
+      workflow_path: workflowPath,
+      workflow_id: workflowId || null,
+      bound_at: new Date().toISOString(),
+    }) + '\n';
+    fs.writeFileSync(bindingPath, content, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the translate workflow bound to a session.
+ * Reads the binding file, loads the state, and returns { path, state }.
+ * Falls back to getActiveTranslateWorkflow() if no binding exists.
+ */
+function getWorkflowForSession(sessionId) {
+  if (sessionId && typeof sessionId === 'string') {
+    const bindingPath = path.join(os.tmpdir(), `translate-binding-${sessionId}.json`);
+    try {
+      if (fs.existsSync(bindingPath)) {
+        const binding = JSON.parse(fs.readFileSync(bindingPath, 'utf8'));
+        if (binding.workflow_path) {
+          const validated = validatePath(binding.workflow_path);
+          if (validated) {
+            const content = fs.readFileSync(validated, 'utf8');
+            const state = JSON.parse(content);
+            if (state && state.status !== 'complete') {
+              return { path: validated, state };
+            }
+          }
+        }
+      }
+    } catch {
+      // Fall through to getActiveTranslateWorkflow()
+    }
+  }
+  return getActiveTranslateWorkflow();
+}
+
+/**
+ * Clean up all translate-related temp files for a session.
+ * Returns the number of files removed.
+ */
+function cleanupSessionTempFiles(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return 0;
+
+  const tmpDir = os.tmpdir();
+  const exactFiles = [
+    `translate-session-marker-${sessionId}.json`,
+    `translate-binding-${sessionId}.json`,
+    `translate-stop-${sessionId}.count`,
+    `translate-stop-${sessionId}.stale`,
+  ];
+
+  let cleaned = 0;
+
+  for (const name of exactFiles) {
+    const filePath = path.join(tmpDir, name);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        cleaned++;
+      }
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+
+  return cleaned;
+}
+
 module.exports = {
   TRANSLATE_DIR,
+  validatePath,
   getActiveTranslateWorkflow,
+  writeSessionMarker,
+  bindSessionToWorkflow,
+  getWorkflowForSession,
+  cleanupSessionTempFiles,
   allViewsDone,
   workflowFullyComplete,
   getPendingViews,

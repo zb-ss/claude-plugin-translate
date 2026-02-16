@@ -19999,7 +19999,7 @@ var i18nVerifyTool = {
 // dist/tools/workflow.js
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync } from "fs";
 import { join as join2, basename as basename5, dirname as dirname3 } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 function getWorkflowDir() {
   const home = process.env.HOME || homedir();
   return join2(home, ".claude/workflows/translate");
@@ -20109,10 +20109,11 @@ function buildChunkingInstructions(view) {
 var workflowInitSchema = external_exports.object({
   componentPath: external_exports.string().describe("Absolute path to the Joomla component"),
   targetLanguage: external_exports.string().describe("Target language code (e.g., fr-CA)"),
-  sourceLanguage: external_exports.string().default("en-GB").describe("Source language code")
+  sourceLanguage: external_exports.string().default("en-GB").describe("Source language code"),
+  sessionId: external_exports.string().optional().describe("Claude Code session ID for session-scoped tracking")
 });
 async function executeWorkflowInit(args) {
-  const { componentPath, targetLanguage, sourceLanguage = "en-GB" } = args;
+  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId } = args;
   if (!existsSync7(componentPath)) {
     return JSON.stringify({ success: false, error: `Component not found: ${componentPath}` });
   }
@@ -20144,6 +20145,7 @@ async function executeWorkflowInit(args) {
     sourceLanguage,
     sourceIniPath: findLanguageFile(componentPath, componentName, sourceLanguage),
     targetIniPath: findLanguageFile(componentPath, componentName, targetLanguage),
+    sessionId: sessionId || void 0,
     created: (/* @__PURE__ */ new Date()).toISOString(),
     updated: (/* @__PURE__ */ new Date()).toISOString(),
     status: "processing",
@@ -20157,6 +20159,19 @@ async function executeWorkflowInit(args) {
     }
   };
   saveWorkflowState(state);
+  if (sessionId) {
+    const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
+    const statePath = getWorkflowStatePath(workflowId);
+    try {
+      writeFileSync4(bindingPath, JSON.stringify({
+        session_id: sessionId,
+        workflow_path: statePath,
+        workflow_id: workflowId,
+        bound_at: (/* @__PURE__ */ new Date()).toISOString()
+      }) + "\n");
+    } catch {
+    }
+  }
   return JSON.stringify({
     success: true,
     workflowId,
@@ -20182,7 +20197,8 @@ var workflowInitTool = {
     properties: {
       componentPath: { type: "string", description: "Absolute path to the Joomla component" },
       targetLanguage: { type: "string", description: "Target language code (e.g., fr-CA)" },
-      sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" }
+      sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" },
+      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" }
     },
     required: ["componentPath", "targetLanguage"]
   },

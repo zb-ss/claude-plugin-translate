@@ -17,7 +17,7 @@ const path = require('path');
 const os = require('os');
 
 try {
-  const { getActiveTranslateWorkflow, workflowFullyComplete, getPendingViews, getViewCounts } = require('./lib/state');
+  const { getWorkflowForSession, workflowFullyComplete, getPendingViews, getViewCounts } = require('./lib/state');
   const { log } = require('./lib/logger');
 
   // Read stdin
@@ -33,8 +33,9 @@ try {
     process.exit(0);
   }
 
-  // Check for active workflow
-  const active = getActiveTranslateWorkflow();
+  // Check for active workflow (session-scoped with fallback)
+  const sessionId = input.session_id || 'unknown';
+  const active = getWorkflowForSession(sessionId);
   if (!active) {
     process.exit(0);
   }
@@ -48,7 +49,6 @@ try {
   }
 
   // Layer 2: Session counter (max 5)
-  const sessionId = input.session_id || 'unknown';
   const counterFile = path.join(os.tmpdir(), `translate-stop-${sessionId}.count`);
   const staleFile = path.join(os.tmpdir(), `translate-stop-${sessionId}.stale`);
 

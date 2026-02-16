@@ -45,18 +45,19 @@ $ARGUMENTS
 
 ---
 
-## DELEGATION — Spawn Orchestrator as Sonnet Subagent
+## DELEGATION — Spawn Orchestrator Subagent
 
-When this skill is invoked, you MUST immediately delegate the entire orchestration to a **sonnet** subagent. Do NOT run the orchestration loop yourself.
+When this skill is invoked, you MUST immediately delegate the entire orchestration to a dedicated orchestrator subagent. Do NOT run the orchestration loop yourself.
 
 1. Parse the arguments (`componentPath`, `targetLanguage`, flags like `--dry-run`, `--resume`, `--skip-review`)
-2. Spawn a single Task agent with:
-   - **Agent type**: `general-purpose`
+2. Obtain the `session_id` from the current session context (it is available via the SessionStart hook's `additionalContext` or from the hook input)
+3. Spawn a single Task agent with:
+   - **Agent type**: `translate:orchestrator`
    - **Model**: `sonnet`
    - **max_turns**: `50`
-   - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments
+   - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments. Include `sessionId: {session_id}` so the orchestrator can pass it to `workflow_translate_init`
 
-The orchestrator subagent will then spawn its own executor subagents for each view.
+The orchestrator subagent will then spawn its own executor subagents for each view via the Task tool.
 
 Your only job after delegation is to relay the final summary back to the user.
 
@@ -87,7 +88,7 @@ You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process vi
 
 ### Step 1: Initialize
 
-1. Call `workflow_translate_init(componentPath, targetLanguage)`
+1. Call `workflow_translate_init(componentPath, targetLanguage, sessionId)` — pass the sessionId received from the delegation prompt
 2. Note the `workflowId`, `sourceIniPath`, `targetIniPath`, total views count
 
 ### Step 2: Batch Processing Loop

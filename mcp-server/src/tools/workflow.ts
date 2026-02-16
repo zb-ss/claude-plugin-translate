@@ -37,6 +37,7 @@ interface WorkflowState {
   sourceLanguage: string
   sourceIniPath: string
   targetIniPath: string
+  sessionId?: string
   created: string
   updated: string
   status: "scanning" | "processing" | "verification" | "complete" | "error"
@@ -51,7 +52,7 @@ interface WorkflowState {
 }
 
 // Helper functions
-import { homedir } from "os"
+import { homedir, tmpdir } from "os"
 
 function getWorkflowDir(): string {
   const home = process.env.HOME || homedir()
@@ -190,13 +191,14 @@ function buildChunkingInstructions(view: ViewInfo) {
 export const workflowInitSchema = z.object({
   componentPath: z.string().describe("Absolute path to the Joomla component"),
   targetLanguage: z.string().describe("Target language code (e.g., fr-CA)"),
-  sourceLanguage: z.string().default("en-GB").describe("Source language code")
+  sourceLanguage: z.string().default("en-GB").describe("Source language code"),
+  sessionId: z.string().optional().describe("Claude Code session ID for session-scoped tracking")
 })
 
 export type WorkflowInitArgs = z.infer<typeof workflowInitSchema>
 
 export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<string> {
-  const { componentPath, targetLanguage, sourceLanguage = "en-GB" } = args
+  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId } = args
 
   if (!existsSync(componentPath)) {
     return JSON.stringify({ success: false, error: `Component not found: ${componentPath}` })
@@ -233,6 +235,7 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
     sourceLanguage,
     sourceIniPath: findLanguageFile(componentPath, componentName, sourceLanguage),
     targetIniPath: findLanguageFile(componentPath, componentName, targetLanguage),
+    sessionId: sessionId || undefined,
     created: new Date().toISOString(),
     updated: new Date().toISOString(),
     status: "processing",
@@ -247,6 +250,22 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
   }
 
   saveWorkflowState(state)
+
+  // Write session binding file for session-scoped stop-guard lookup
+  if (sessionId) {
+    const bindingPath = join(tmpdir(), `translate-binding-${sessionId}.json`)
+    const statePath = getWorkflowStatePath(workflowId)
+    try {
+      writeFileSync(bindingPath, JSON.stringify({
+        session_id: sessionId,
+        workflow_path: statePath,
+        workflow_id: workflowId,
+        bound_at: new Date().toISOString(),
+      }) + '\n')
+    } catch {
+      // Non-fatal: session binding is optional, fallback exists
+    }
+  }
 
   return JSON.stringify({
     success: true,
@@ -274,7 +293,8 @@ export const workflowInitTool = {
     properties: {
       componentPath: { type: "string", description: "Absolute path to the Joomla component" },
       targetLanguage: { type: "string", description: "Target language code (e.g., fr-CA)" },
-      sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" }
+      sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" },
+      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" }
     },
     required: ["componentPath", "targetLanguage"]
   },
