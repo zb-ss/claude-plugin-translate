@@ -20121,11 +20121,38 @@ async function executeWorkflowInit(args) {
   const workflowId = generateWorkflowId(componentName);
   const existing = loadWorkflowState(workflowId);
   if (existing && existing.status !== "complete") {
+    let orphansReset = 0;
+    for (const view of existing.views) {
+      if (view.status === "processing" || view.status === "review") {
+        view.status = "pending";
+        orphansReset++;
+      }
+    }
+    if (sessionId) {
+      existing.sessionId = sessionId;
+    }
+    if (orphansReset > 0) {
+      saveWorkflowState(existing);
+    }
+    if (sessionId) {
+      const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
+      const statePath = getWorkflowStatePath(workflowId);
+      try {
+        writeFileSync4(bindingPath, JSON.stringify({
+          session_id: sessionId,
+          workflow_path: statePath,
+          workflow_id: workflowId,
+          bound_at: (/* @__PURE__ */ new Date()).toISOString()
+        }) + "\n");
+      } catch {
+      }
+    }
     return JSON.stringify({
       success: true,
       resumed: true,
       workflowId,
-      message: `Resuming existing workflow`,
+      message: orphansReset > 0 ? `Resuming existing workflow. Reset ${orphansReset} orphaned view(s) back to pending.` : `Resuming existing workflow`,
+      orphansReset,
       progress: {
         total: existing.views.length,
         done: existing.views.filter((v) => v.status === "done").length,

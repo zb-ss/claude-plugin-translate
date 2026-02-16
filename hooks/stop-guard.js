@@ -3,8 +3,9 @@
  * Stop Guard for Translation Workflow
  *
  * Prevents Claude from stopping when views remain unprocessed.
- * 3-layer infinite loop prevention:
+ * 4-layer infinite loop prevention:
  *   1. Circuit breaker (stop_hook_active)
+ *   1.5. Time-based staleness (workflow not updated in 10+ minutes)
  *   2. Session counter (max 5 consecutive blocks)
  *   3. Staleness detection (updated_at unchanged 3x)
  *
@@ -45,6 +46,17 @@ try {
   // Allow stop if workflow fully complete (all views done AND completion guard passed)
   if (workflowFullyComplete(state)) {
     log('stop-guard', `Workflow fully complete for ${state.id}, allowing stop`);
+    process.exit(0);
+  }
+
+  // Layer 1.5: Time-based staleness — if workflow hasn't been updated in 10+ minutes,
+  // the orchestrator is likely dead. Allow stop immediately.
+  const STALE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+  const lastUpdated = new Date(state.updated || 0).getTime();
+  const timeSinceUpdate = Date.now() - lastUpdated;
+  if (timeSinceUpdate > STALE_TIMEOUT_MS) {
+    const mins = Math.round(timeSinceUpdate / 60000);
+    log('stop-guard', `Time-based staleness: workflow "${state.id}" not updated in ${mins} minutes, allowing stop`);
     process.exit(0);
   }
 

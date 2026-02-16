@@ -209,11 +209,49 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
 
   const existing = loadWorkflowState(workflowId)
   if (existing && existing.status !== "complete") {
+    // Reset orphaned views stuck in "processing" or "review" back to "pending"
+    // These are views whose executor died (e.g., context limit) without completing
+    let orphansReset = 0
+    for (const view of existing.views) {
+      if (view.status === "processing" || view.status === "review") {
+        view.status = "pending"
+        orphansReset++
+      }
+    }
+
+    // Update sessionId if provided (new session resuming old workflow)
+    if (sessionId) {
+      existing.sessionId = sessionId
+    }
+
+    if (orphansReset > 0) {
+      saveWorkflowState(existing)
+    }
+
+    // Write session binding for the new session
+    if (sessionId) {
+      const bindingPath = join(tmpdir(), `translate-binding-${sessionId}.json`)
+      const statePath = getWorkflowStatePath(workflowId)
+      try {
+        writeFileSync(bindingPath, JSON.stringify({
+          session_id: sessionId,
+          workflow_path: statePath,
+          workflow_id: workflowId,
+          bound_at: new Date().toISOString(),
+        }) + '\n')
+      } catch {
+        // Non-fatal
+      }
+    }
+
     return JSON.stringify({
       success: true,
       resumed: true,
       workflowId,
-      message: `Resuming existing workflow`,
+      message: orphansReset > 0
+        ? `Resuming existing workflow. Reset ${orphansReset} orphaned view(s) back to pending.`
+        : `Resuming existing workflow`,
+      orphansReset,
       progress: {
         total: existing.views.length,
         done: existing.views.filter(v => v.status === "done").length,
