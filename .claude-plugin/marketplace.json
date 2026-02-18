@@ -8,8 +8,7 @@
     {
       "name": "translate",
       "source": "./",
-      "description": "Joomla component i18n translation workflows",
-      "version": "1.0.0"
+      "description": "Joomla component i18n translation workflows"
     }
   ]
 }

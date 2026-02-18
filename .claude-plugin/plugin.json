@@ -1,7 +1,6 @@
 {
   "name": "translate",
   "description": "Joomla translation workflow commands with MCP tools",
-  "version": "1.3.0",
   "mcpServers": {
     "translate": {
       "command": "node",
