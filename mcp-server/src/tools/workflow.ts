@@ -12,7 +12,7 @@
  * - workflow_translate_status: Get workflow status
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, openSync, closeSync, constants as fsConstants } from "fs"
 import { join, basename, dirname } from "path"
 import { z } from "zod"
 
@@ -67,6 +67,53 @@ function getWorkflowStatePath(workflowId: string): string {
   return join(baseDir, "workflow-state.json")
 }
 
+/**
+ * Acquire an advisory lock for a workflow state file.
+ * Uses a .lock file with O_EXCL to prevent concurrent access.
+ * Returns the lock file path on success, null on failure.
+ */
+function acquireLock(workflowId: string, timeoutMs: number = 3000): string | null {
+  const lockPath = getWorkflowStatePath(workflowId) + ".lock"
+  const deadline = Date.now() + timeoutMs
+  const retryInterval = 50
+
+  while (Date.now() < deadline) {
+    try {
+      // O_EXCL ensures atomic creation — fails if file exists
+      const fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL)
+      const lockContent = JSON.stringify({ pid: process.pid, acquired: new Date().toISOString() })
+      writeFileSync(fd, lockContent)
+      closeSync(fd)
+      return lockPath
+    } catch {
+      // Lock exists — check if it's stale (>10s old)
+      try {
+        const lockContent = readFileSync(lockPath, "utf-8")
+        const lockData = JSON.parse(lockContent)
+        const lockAge = Date.now() - new Date(lockData.acquired).getTime()
+        if (lockAge > 10000) {
+          // Stale lock — force remove and retry
+          try { unlinkSync(lockPath) } catch {}
+          continue
+        }
+      } catch {
+        // Corrupt lock file — remove and retry
+        try { unlinkSync(lockPath) } catch {}
+        continue
+      }
+
+      // Wait and retry
+      const waitUntil = Date.now() + retryInterval
+      while (Date.now() < waitUntil) { /* busy wait */ }
+    }
+  }
+  return null
+}
+
+function releaseLock(lockPath: string): void {
+  try { unlinkSync(lockPath) } catch {}
+}
+
 function loadWorkflowState(workflowId: string): WorkflowState | null {
   const statePath = getWorkflowStatePath(workflowId)
   if (existsSync(statePath)) {
@@ -81,7 +128,56 @@ function saveWorkflowState(state: WorkflowState): void {
   writeFileSync(statePath, JSON.stringify(state, null, 2))
 }
 
-function findActiveWorkflow(): string | null {
+/**
+ * Load state with advisory lock. Returns { state, lockPath } or null.
+ * Caller MUST call releaseLock(lockPath) when done mutating.
+ */
+function loadWorkflowStateLocked(workflowId: string): { state: WorkflowState; lockPath: string } | null {
+  const lockPath = acquireLock(workflowId)
+  if (!lockPath) return null
+
+  const state = loadWorkflowState(workflowId)
+  if (!state) {
+    releaseLock(lockPath)
+    return null
+  }
+
+  return { state, lockPath }
+}
+
+/**
+ * Save state and release advisory lock.
+ */
+function saveWorkflowStateAndUnlock(state: WorkflowState, lockPath: string): void {
+  saveWorkflowState(state)
+  releaseLock(lockPath)
+}
+
+/**
+ * Resolve a workflowId from session binding, then fall back to global discovery.
+ * When a sessionId is provided, checks /tmp/translate-binding-{sessionId}.json first.
+ */
+function findActiveWorkflow(sessionId?: string): string | null {
+  // 1. Try session-scoped binding first
+  if (sessionId) {
+    const bindingPath = join(tmpdir(), `translate-binding-${sessionId}.json`)
+    try {
+      if (existsSync(bindingPath)) {
+        const binding = JSON.parse(readFileSync(bindingPath, "utf-8"))
+        if (binding.workflow_id) {
+          // Verify the workflow still exists and is not complete
+          const state = loadWorkflowState(binding.workflow_id)
+          if (state && state.status !== "complete") {
+            return binding.workflow_id
+          }
+        }
+      }
+    } catch {
+      // Fall through to global discovery
+    }
+  }
+
+  // 2. Fall back to global discovery (finds most recent non-complete workflow)
   const activeDir = getWorkflowDir()
   if (!existsSync(activeDir)) return null
 
@@ -90,7 +186,14 @@ function findActiveWorkflow(): string | null {
     .sort()
     .reverse()
 
-  return dirs.length > 0 ? dirs[0] : null
+  for (const dir of dirs) {
+    const state = loadWorkflowState(dir)
+    if (state && state.status !== "complete") {
+      return dir
+    }
+  }
+
+  return null
 }
 
 function generateWorkflowId(componentName: string): string {
@@ -207,7 +310,11 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
   const componentName = getComponentName(componentPath)
   const workflowId = generateWorkflowId(componentName)
 
-  const existing = loadWorkflowState(workflowId)
+  // Use locking for the resume path since another instance may be active
+  const locked = loadWorkflowStateLocked(workflowId)
+  const existing = locked?.state ?? null
+  const existingLock = locked?.lockPath ?? null
+
   if (existing && existing.status !== "complete") {
     // Reset orphaned views stuck in "processing" or "review" back to "pending"
     // These are views whose executor died (e.g., context limit) without completing
@@ -224,9 +331,10 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
       existing.sessionId = sessionId
     }
 
-    if (orphansReset > 0) {
+    if (orphansReset > 0 || sessionId) {
       saveWorkflowState(existing)
     }
+    if (existingLock) releaseLock(existingLock)
 
     // Write session binding for the new session
     if (sessionId) {
@@ -259,6 +367,9 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
       }
     })
   }
+
+  // Release lock from the existing-but-complete or null case
+  if (existingLock) releaseLock(existingLock)
 
   const views = findViewFiles(componentPath)
   if (views.length === 0) {
@@ -344,21 +455,24 @@ export const workflowInitTool = {
 // ============================================
 
 export const workflowNextSchema = z.object({
-  workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)")
+  workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: z.string().optional().describe("Session ID for session-scoped workflow lookup")
 })
 
 export type WorkflowNextArgs = z.infer<typeof workflowNextSchema>
 
 export async function executeWorkflowNext(args: WorkflowNextArgs): Promise<string> {
-  const workflowId = args.workflowId || findActiveWorkflow()
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId)
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" })
   }
 
-  const state = loadWorkflowState(workflowId)
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${workflowId}` })
+  // Use locked load to prevent concurrent mutation
+  const locked = loadWorkflowStateLocked(workflowId)
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${workflowId}` })
   }
+  const { state, lockPath } = locked
 
   const nextView = state.views.find(v => v.status === "pending" || v.status === "error")
 
@@ -366,7 +480,7 @@ export async function executeWorkflowNext(args: WorkflowNextArgs): Promise<strin
     const allDone = state.views.every(v => v.status === "done")
     if (allDone) {
       state.status = "verification"
-      saveWorkflowState(state)
+      saveWorkflowStateAndUnlock(state, lockPath)
       return JSON.stringify({
         success: true,
         complete: true,
@@ -378,13 +492,14 @@ export async function executeWorkflowNext(args: WorkflowNextArgs): Promise<strin
         }
       })
     }
+    releaseLock(lockPath)
     return JSON.stringify({ success: false, error: "No views ready to process" })
   }
 
   nextView.status = "processing"
   nextView.attempts++
   state.currentViewIndex = state.views.indexOf(nextView)
-  saveWorkflowState(state)
+  saveWorkflowStateAndUnlock(state, lockPath)
 
   const chunkingInstructions = buildChunkingInstructions(nextView)
 
@@ -445,7 +560,8 @@ export const workflowNextTool = {
   inputSchema: {
     type: "object" as const,
     properties: {
-      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" }
+      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" }
     },
     required: []
   },
@@ -458,21 +574,24 @@ export const workflowNextTool = {
 
 export const workflowNextBatchSchema = z.object({
   workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: z.string().optional().describe("Session ID for session-scoped workflow lookup"),
   batchSize: z.number().min(1).max(4).default(4).describe("Number of views to return (1-4, default 4)")
 })
 
 export type WorkflowNextBatchArgs = z.infer<typeof workflowNextBatchSchema>
 
 export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Promise<string> {
-  const workflowId = args.workflowId || findActiveWorkflow()
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId)
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" })
   }
 
-  const state = loadWorkflowState(workflowId)
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${workflowId}` })
+  // Use locked load to prevent concurrent batch assignment
+  const locked = loadWorkflowStateLocked(workflowId)
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${workflowId}` })
   }
+  const { state, lockPath } = locked
 
   const pendingViews = state.views.filter(v => v.status === "pending" || v.status === "error")
 
@@ -480,7 +599,7 @@ export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Pro
     const allDone = state.views.every(v => v.status === "done")
     if (allDone) {
       state.status = "verification"
-      saveWorkflowState(state)
+      saveWorkflowStateAndUnlock(state, lockPath)
       return JSON.stringify({
         success: true,
         complete: true,
@@ -492,18 +611,19 @@ export async function executeWorkflowNextBatch(args: WorkflowNextBatchArgs): Pro
         }
       })
     }
+    releaseLock(lockPath)
     return JSON.stringify({ success: false, error: "No views ready to process" })
   }
 
   const batchSize = Math.min(args.batchSize ?? 4, 4, pendingViews.length)
   const batch = pendingViews.slice(0, batchSize)
 
-  // Mark all batch views as processing atomically
+  // Mark all batch views as processing atomically under lock
   for (const view of batch) {
     view.status = "processing"
     view.attempts++
   }
-  saveWorkflowState(state)
+  saveWorkflowStateAndUnlock(state, lockPath)
 
   const batchViews = batch.map(view => ({
     path: view.path,
@@ -543,6 +663,7 @@ export const workflowNextBatchTool = {
     type: "object" as const,
     properties: {
       workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" },
       batchSize: { type: "number", description: "Number of views to return (1-4, default 4)", default: 4 }
     },
     required: []
@@ -565,19 +686,22 @@ export const workflowViewDoneSchema = z.object({
 export type WorkflowViewDoneArgs = z.infer<typeof workflowViewDoneSchema>
 
 export async function executeWorkflowViewDone(args: WorkflowViewDoneArgs): Promise<string> {
-  const state = loadWorkflowState(args.workflowId)
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` })
+  const locked = loadWorkflowStateLocked(args.workflowId)
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` })
   }
+  const { state, lockPath } = locked
 
   const view = state.views.find(v =>
     v.path === args.viewPath || v.relativePath === args.viewPath
   )
   if (!view) {
+    releaseLock(lockPath)
     return JSON.stringify({ success: false, error: `View not found: ${args.viewPath}` })
   }
 
   if (view.needsChunking && args.stringsFound === 0) {
+    releaseLock(lockPath)
     return JSON.stringify({
       success: false,
       error: `REJECTED: Large file (${view.lines} lines) cannot have 0 hardcoded strings. You MUST process this file using chunking.`,
@@ -594,6 +718,7 @@ export async function executeWorkflowViewDone(args: WorkflowViewDoneArgs): Promi
 
   const expectedMinStrings = Math.floor(view.lines / 100)
   if (view.needsChunking && args.stringsFound < expectedMinStrings) {
+    releaseLock(lockPath)
     return JSON.stringify({
       success: false,
       error: `REJECTED: Large file (${view.lines} lines) reported only ${args.stringsFound} strings. Expected at least ${expectedMinStrings}. Did you process ALL chunks?`,
@@ -621,7 +746,7 @@ export async function executeWorkflowViewDone(args: WorkflowViewDoneArgs): Promi
 
   view.status = "review"
   state.totalStringsConverted += args.stringsConverted
-  saveWorkflowState(state)
+  saveWorkflowStateAndUnlock(state, lockPath)
 
   return JSON.stringify({
     success: true,
@@ -663,19 +788,22 @@ export const workflowReviewSchema = z.object({
 export type WorkflowReviewArgs = z.infer<typeof workflowReviewSchema>
 
 export async function executeWorkflowReview(args: WorkflowReviewArgs): Promise<string> {
-  const state = loadWorkflowState(args.workflowId)
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` })
+  const locked = loadWorkflowStateLocked(args.workflowId)
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` })
   }
+  const { state, lockPath } = locked
 
   const view = state.views.find(v =>
     v.path === args.viewPath || v.relativePath === args.viewPath
   )
   if (!view) {
+    releaseLock(lockPath)
     return JSON.stringify({ success: false, error: `View not found: ${args.viewPath}` })
   }
 
   if (args.passed && view.needsChunking && view.stringsConverted === 0) {
+    releaseLock(lockPath)
     return JSON.stringify({
       success: false,
       error: `REJECTED: Cannot pass review for large file (${view.lines} lines) with 0 strings converted.`,
@@ -686,15 +814,15 @@ export async function executeWorkflowReview(args: WorkflowReviewArgs): Promise<s
   if (args.passed) {
     view.status = "done"
     view.errors = []
-    saveWorkflowState(state)
 
     const remaining = state.views.filter(v => v.status !== "done").length
     const allDone = remaining === 0
 
     if (allDone) {
       state.status = "verification"
-      saveWorkflowState(state)
     }
+
+    saveWorkflowStateAndUnlock(state, lockPath)
 
     return JSON.stringify({
       success: true,
@@ -719,7 +847,7 @@ export async function executeWorkflowReview(args: WorkflowReviewArgs): Promise<s
 
     if (view.attempts >= 3) {
       view.status = "error"
-      saveWorkflowState(state)
+      saveWorkflowStateAndUnlock(state, lockPath)
       return JSON.stringify({
         success: true,
         passed: false,
@@ -730,7 +858,7 @@ export async function executeWorkflowReview(args: WorkflowReviewArgs): Promise<s
     }
 
     view.status = "error"
-    saveWorkflowState(state)
+    saveWorkflowStateAndUnlock(state, lockPath)
 
     return JSON.stringify({
       success: true,
@@ -765,13 +893,14 @@ export const workflowReviewTool = {
 // ============================================
 
 export const workflowStatusSchema = z.object({
-  workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)")
+  workflowId: z.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: z.string().optional().describe("Session ID for session-scoped workflow lookup")
 })
 
 export type WorkflowStatusArgs = z.infer<typeof workflowStatusSchema>
 
 export async function executeWorkflowStatus(args: WorkflowStatusArgs): Promise<string> {
-  const workflowId = args.workflowId || findActiveWorkflow()
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId)
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" })
   }
@@ -818,7 +947,8 @@ export const workflowStatusTool = {
   inputSchema: {
     type: "object" as const,
     properties: {
-      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" }
+      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" }
     },
     required: []
   },
@@ -838,10 +968,11 @@ export const workflowGateUpdateSchema = z.object({
 export type WorkflowGateUpdateArgs = z.infer<typeof workflowGateUpdateSchema>
 
 export async function executeWorkflowGateUpdate(args: WorkflowGateUpdateArgs): Promise<string> {
-  const state = loadWorkflowState(args.workflowId)
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` })
+  const locked = loadWorkflowStateLocked(args.workflowId)
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` })
   }
+  const { state, lockPath } = locked
 
   if (!state.gates) {
     state.gates = {
@@ -861,7 +992,7 @@ export async function executeWorkflowGateUpdate(args: WorkflowGateUpdateArgs): P
     state.status = 'complete'
   }
 
-  saveWorkflowState(state)
+  saveWorkflowStateAndUnlock(state, lockPath)
 
   return JSON.stringify({
     success: true,

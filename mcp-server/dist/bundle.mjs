@@ -19997,7 +19997,7 @@ var i18nVerifyTool = {
 };
 
 // dist/tools/workflow.js
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync } from "fs";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync, unlinkSync, openSync, closeSync, constants as fsConstants } from "fs";
 import { join as join2, basename as basename5, dirname as dirname3 } from "path";
 import { homedir, tmpdir } from "os";
 function getWorkflowDir() {
@@ -20011,6 +20011,49 @@ function getWorkflowStatePath(workflowId) {
   }
   return join2(baseDir, "workflow-state.json");
 }
+function acquireLock(workflowId, timeoutMs = 3e3) {
+  const lockPath = getWorkflowStatePath(workflowId) + ".lock";
+  const deadline = Date.now() + timeoutMs;
+  const retryInterval = 50;
+  while (Date.now() < deadline) {
+    try {
+      const fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL);
+      const lockContent = JSON.stringify({ pid: process.pid, acquired: (/* @__PURE__ */ new Date()).toISOString() });
+      writeFileSync4(fd, lockContent);
+      closeSync(fd);
+      return lockPath;
+    } catch {
+      try {
+        const lockContent = readFileSync7(lockPath, "utf-8");
+        const lockData = JSON.parse(lockContent);
+        const lockAge = Date.now() - new Date(lockData.acquired).getTime();
+        if (lockAge > 1e4) {
+          try {
+            unlinkSync(lockPath);
+          } catch {
+          }
+          continue;
+        }
+      } catch {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+        }
+        continue;
+      }
+      const waitUntil = Date.now() + retryInterval;
+      while (Date.now() < waitUntil) {
+      }
+    }
+  }
+  return null;
+}
+function releaseLock(lockPath) {
+  try {
+    unlinkSync(lockPath);
+  } catch {
+  }
+}
 function loadWorkflowState(workflowId) {
   const statePath = getWorkflowStatePath(workflowId);
   if (existsSync7(statePath)) {
@@ -20023,12 +20066,48 @@ function saveWorkflowState(state) {
   state.updated = (/* @__PURE__ */ new Date()).toISOString();
   writeFileSync4(statePath, JSON.stringify(state, null, 2));
 }
-function findActiveWorkflow() {
+function loadWorkflowStateLocked(workflowId) {
+  const lockPath = acquireLock(workflowId);
+  if (!lockPath)
+    return null;
+  const state = loadWorkflowState(workflowId);
+  if (!state) {
+    releaseLock(lockPath);
+    return null;
+  }
+  return { state, lockPath };
+}
+function saveWorkflowStateAndUnlock(state, lockPath) {
+  saveWorkflowState(state);
+  releaseLock(lockPath);
+}
+function findActiveWorkflow(sessionId) {
+  if (sessionId) {
+    const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
+    try {
+      if (existsSync7(bindingPath)) {
+        const binding = JSON.parse(readFileSync7(bindingPath, "utf-8"));
+        if (binding.workflow_id) {
+          const state = loadWorkflowState(binding.workflow_id);
+          if (state && state.status !== "complete") {
+            return binding.workflow_id;
+          }
+        }
+      }
+    } catch {
+    }
+  }
   const activeDir = getWorkflowDir();
   if (!existsSync7(activeDir))
     return null;
   const dirs = readdirSync(activeDir).filter((d) => d.includes("-translate-")).sort().reverse();
-  return dirs.length > 0 ? dirs[0] : null;
+  for (const dir of dirs) {
+    const state = loadWorkflowState(dir);
+    if (state && state.status !== "complete") {
+      return dir;
+    }
+  }
+  return null;
 }
 function generateWorkflowId(componentName) {
   const date3 = (/* @__PURE__ */ new Date()).toISOString().split("T")[0].replace(/-/g, "");
@@ -20119,7 +20198,9 @@ async function executeWorkflowInit(args) {
   }
   const componentName = getComponentName(componentPath);
   const workflowId = generateWorkflowId(componentName);
-  const existing = loadWorkflowState(workflowId);
+  const locked = loadWorkflowStateLocked(workflowId);
+  const existing = locked?.state ?? null;
+  const existingLock = locked?.lockPath ?? null;
   if (existing && existing.status !== "complete") {
     let orphansReset = 0;
     for (const view of existing.views) {
@@ -20131,9 +20212,11 @@ async function executeWorkflowInit(args) {
     if (sessionId) {
       existing.sessionId = sessionId;
     }
-    if (orphansReset > 0) {
+    if (orphansReset > 0 || sessionId) {
       saveWorkflowState(existing);
     }
+    if (existingLock)
+      releaseLock(existingLock);
     if (sessionId) {
       const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
       const statePath = getWorkflowStatePath(workflowId);
@@ -20160,6 +20243,8 @@ async function executeWorkflowInit(args) {
       }
     });
   }
+  if (existingLock)
+    releaseLock(existingLock);
   const views = findViewFiles(componentPath);
   if (views.length === 0) {
     return JSON.stringify({ success: false, error: "No view files found" });
@@ -20232,23 +20317,25 @@ var workflowInitTool = {
   execute: executeWorkflowInit
 };
 var workflowNextSchema = external_exports.object({
-  workflowId: external_exports.string().optional().describe("Workflow ID (auto-detects if not provided)")
+  workflowId: external_exports.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: external_exports.string().optional().describe("Session ID for session-scoped workflow lookup")
 });
 async function executeWorkflowNext(args) {
-  const workflowId = args.workflowId || findActiveWorkflow();
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId);
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" });
   }
-  const state = loadWorkflowState(workflowId);
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${workflowId}` });
+  const locked = loadWorkflowStateLocked(workflowId);
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${workflowId}` });
   }
+  const { state, lockPath } = locked;
   const nextView = state.views.find((v) => v.status === "pending" || v.status === "error");
   if (!nextView) {
     const allDone = state.views.every((v) => v.status === "done");
     if (allDone) {
       state.status = "verification";
-      saveWorkflowState(state);
+      saveWorkflowStateAndUnlock(state, lockPath);
       return JSON.stringify({
         success: true,
         complete: true,
@@ -20260,12 +20347,13 @@ async function executeWorkflowNext(args) {
         }
       });
     }
+    releaseLock(lockPath);
     return JSON.stringify({ success: false, error: "No views ready to process" });
   }
   nextView.status = "processing";
   nextView.attempts++;
   state.currentViewIndex = state.views.indexOf(nextView);
-  saveWorkflowState(state);
+  saveWorkflowStateAndUnlock(state, lockPath);
   const chunkingInstructions = buildChunkingInstructions(nextView);
   const explicitInstructions = [
     "========================================",
@@ -20320,7 +20408,8 @@ var workflowNextTool = {
   inputSchema: {
     type: "object",
     properties: {
-      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" }
+      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" }
     },
     required: []
   },
@@ -20328,23 +20417,25 @@ var workflowNextTool = {
 };
 var workflowNextBatchSchema = external_exports.object({
   workflowId: external_exports.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: external_exports.string().optional().describe("Session ID for session-scoped workflow lookup"),
   batchSize: external_exports.number().min(1).max(4).default(4).describe("Number of views to return (1-4, default 4)")
 });
 async function executeWorkflowNextBatch(args) {
-  const workflowId = args.workflowId || findActiveWorkflow();
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId);
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" });
   }
-  const state = loadWorkflowState(workflowId);
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${workflowId}` });
+  const locked = loadWorkflowStateLocked(workflowId);
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${workflowId}` });
   }
+  const { state, lockPath } = locked;
   const pendingViews = state.views.filter((v) => v.status === "pending" || v.status === "error");
   if (pendingViews.length === 0) {
     const allDone = state.views.every((v) => v.status === "done");
     if (allDone) {
       state.status = "verification";
-      saveWorkflowState(state);
+      saveWorkflowStateAndUnlock(state, lockPath);
       return JSON.stringify({
         success: true,
         complete: true,
@@ -20356,6 +20447,7 @@ async function executeWorkflowNextBatch(args) {
         }
       });
     }
+    releaseLock(lockPath);
     return JSON.stringify({ success: false, error: "No views ready to process" });
   }
   const batchSize = Math.min(args.batchSize ?? 4, 4, pendingViews.length);
@@ -20364,7 +20456,7 @@ async function executeWorkflowNextBatch(args) {
     view.status = "processing";
     view.attempts++;
   }
-  saveWorkflowState(state);
+  saveWorkflowStateAndUnlock(state, lockPath);
   const batchViews = batch.map((view) => ({
     path: view.path,
     relativePath: view.relativePath,
@@ -20400,6 +20492,7 @@ var workflowNextBatchTool = {
     type: "object",
     properties: {
       workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" },
       batchSize: { type: "number", description: "Number of views to return (1-4, default 4)", default: 4 }
     },
     required: []
@@ -20414,15 +20507,18 @@ var workflowViewDoneSchema = external_exports.object({
   errors: external_exports.string().optional().describe("JSON array of error messages, if any")
 });
 async function executeWorkflowViewDone(args) {
-  const state = loadWorkflowState(args.workflowId);
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` });
+  const locked = loadWorkflowStateLocked(args.workflowId);
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` });
   }
+  const { state, lockPath } = locked;
   const view = state.views.find((v) => v.path === args.viewPath || v.relativePath === args.viewPath);
   if (!view) {
+    releaseLock(lockPath);
     return JSON.stringify({ success: false, error: `View not found: ${args.viewPath}` });
   }
   if (view.needsChunking && args.stringsFound === 0) {
+    releaseLock(lockPath);
     return JSON.stringify({
       success: false,
       error: `REJECTED: Large file (${view.lines} lines) cannot have 0 hardcoded strings. You MUST process this file using chunking.`,
@@ -20438,6 +20534,7 @@ async function executeWorkflowViewDone(args) {
   }
   const expectedMinStrings = Math.floor(view.lines / 100);
   if (view.needsChunking && args.stringsFound < expectedMinStrings) {
+    releaseLock(lockPath);
     return JSON.stringify({
       success: false,
       error: `REJECTED: Large file (${view.lines} lines) reported only ${args.stringsFound} strings. Expected at least ${expectedMinStrings}. Did you process ALL chunks?`,
@@ -20462,7 +20559,7 @@ async function executeWorkflowViewDone(args) {
   }
   view.status = "review";
   state.totalStringsConverted += args.stringsConverted;
-  saveWorkflowState(state);
+  saveWorkflowStateAndUnlock(state, lockPath);
   return JSON.stringify({
     success: true,
     message: "View marked for review",
@@ -20494,15 +20591,18 @@ var workflowReviewSchema = external_exports.object({
   issues: external_exports.string().optional().describe("JSON array of issues found (if failed)")
 });
 async function executeWorkflowReview(args) {
-  const state = loadWorkflowState(args.workflowId);
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` });
+  const locked = loadWorkflowStateLocked(args.workflowId);
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` });
   }
+  const { state, lockPath } = locked;
   const view = state.views.find((v) => v.path === args.viewPath || v.relativePath === args.viewPath);
   if (!view) {
+    releaseLock(lockPath);
     return JSON.stringify({ success: false, error: `View not found: ${args.viewPath}` });
   }
   if (args.passed && view.needsChunking && view.stringsConverted === 0) {
+    releaseLock(lockPath);
     return JSON.stringify({
       success: false,
       error: `REJECTED: Cannot pass review for large file (${view.lines} lines) with 0 strings converted.`,
@@ -20512,13 +20612,12 @@ async function executeWorkflowReview(args) {
   if (args.passed) {
     view.status = "done";
     view.errors = [];
-    saveWorkflowState(state);
     const remaining = state.views.filter((v) => v.status !== "done").length;
     const allDone = remaining === 0;
     if (allDone) {
       state.status = "verification";
-      saveWorkflowState(state);
     }
+    saveWorkflowStateAndUnlock(state, lockPath);
     return JSON.stringify({
       success: true,
       passed: true,
@@ -20538,7 +20637,7 @@ async function executeWorkflowReview(args) {
     state.totalErrors++;
     if (view.attempts >= 3) {
       view.status = "error";
-      saveWorkflowState(state);
+      saveWorkflowStateAndUnlock(state, lockPath);
       return JSON.stringify({
         success: true,
         passed: false,
@@ -20548,7 +20647,7 @@ async function executeWorkflowReview(args) {
       });
     }
     view.status = "error";
-    saveWorkflowState(state);
+    saveWorkflowStateAndUnlock(state, lockPath);
     return JSON.stringify({
       success: true,
       passed: false,
@@ -20576,10 +20675,11 @@ var workflowReviewTool = {
   execute: executeWorkflowReview
 };
 var workflowStatusSchema = external_exports.object({
-  workflowId: external_exports.string().optional().describe("Workflow ID (auto-detects if not provided)")
+  workflowId: external_exports.string().optional().describe("Workflow ID (auto-detects if not provided)"),
+  sessionId: external_exports.string().optional().describe("Session ID for session-scoped workflow lookup")
 });
 async function executeWorkflowStatus(args) {
-  const workflowId = args.workflowId || findActiveWorkflow();
+  const workflowId = args.workflowId || findActiveWorkflow(args.sessionId);
   if (!workflowId) {
     return JSON.stringify({ success: false, error: "No active workflow found" });
   }
@@ -20622,7 +20722,8 @@ var workflowStatusTool = {
   inputSchema: {
     type: "object",
     properties: {
-      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" }
+      workflowId: { type: "string", description: "Workflow ID (auto-detects if not provided)" },
+      sessionId: { type: "string", description: "Session ID for session-scoped workflow lookup" }
     },
     required: []
   },
@@ -20634,10 +20735,11 @@ var workflowGateUpdateSchema = external_exports.object({
   status: external_exports.enum(["pending", "passed", "failed"]).describe("New status")
 });
 async function executeWorkflowGateUpdate(args) {
-  const state = loadWorkflowState(args.workflowId);
-  if (!state) {
-    return JSON.stringify({ success: false, error: `Workflow not found: ${args.workflowId}` });
+  const locked = loadWorkflowStateLocked(args.workflowId);
+  if (!locked) {
+    return JSON.stringify({ success: false, error: `Workflow not found or locked: ${args.workflowId}` });
   }
+  const { state, lockPath } = locked;
   if (!state.gates) {
     state.gates = {
       hardcode_sweep: { status: "pending", iteration: 0 },
@@ -20652,7 +20754,7 @@ async function executeWorkflowGateUpdate(args) {
   if (args.gateName === "completion_guard" && args.status === "passed") {
     state.status = "complete";
   }
-  saveWorkflowState(state);
+  saveWorkflowStateAndUnlock(state, lockPath);
   return JSON.stringify({
     success: true,
     gate: args.gateName,

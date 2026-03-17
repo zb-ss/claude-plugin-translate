@@ -97,7 +97,9 @@ Repeat until all views are processed:
 
 #### Phase 1 — Get Batch
 
-Call `workflow_translate_next_batch(batchSize=4)`.
+Call `workflow_translate_next_batch(workflowId=<workflowId>, batchSize=4)`.
+
+**CRITICAL**: Always pass `workflowId` explicitly to EVERY workflow tool call (`workflow_translate_next_batch`, `workflow_translate_view_done`, `workflow_translate_review`, `workflow_translate_status`, `workflow_translate_gate_update`). Never rely on auto-detection — multiple concurrent workflows may be active.
 
 If response has `complete: true`, go to Step 3 (Completion Guard).
 

@@ -11,7 +11,7 @@
 const fs = require('fs');
 
 try {
-  const { getActiveTranslateWorkflow, writeSessionMarker, getViewCounts } = require('./lib/state');
+  const { getActiveTranslateWorkflow, getWorkflowForSession, writeSessionMarker, getViewCounts } = require('./lib/state');
   const { log } = require('./lib/logger');
 
   // Read stdin (hook input JSON)
@@ -27,8 +27,8 @@ try {
     writeSessionMarker(sessionId);
   }
 
-  // Scan for active translate workflows
-  const active = getActiveTranslateWorkflow();
+  // Scan for active translate workflows (session-scoped first, then global fallback)
+  const active = sessionId ? getWorkflowForSession(sessionId) : getActiveTranslateWorkflow();
 
   if (!active) {
     process.exit(0);
