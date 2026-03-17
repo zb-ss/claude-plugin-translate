@@ -20198,10 +20198,13 @@ var workflowInitSchema = external_exports.object({
   componentPath: external_exports.string().describe("Absolute path to the Joomla component"),
   targetLanguage: external_exports.string().describe("Target language code (e.g., fr-CA)"),
   sourceLanguage: external_exports.string().default("en-GB").describe("Source language code"),
-  sessionId: external_exports.string().optional().describe("Claude Code session ID for session-scoped tracking")
+  sessionId: external_exports.string().optional().describe("Claude Code session ID for session-scoped tracking"),
+  joomlaUrl: external_exports.string().optional().describe("Base URL for Joomla admin panel for browser verification"),
+  joomlaUser: external_exports.string().optional().describe("Joomla admin username for browser verification"),
+  joomlaPassword: external_exports.string().optional().describe("Joomla admin password for browser verification")
 });
 async function executeWorkflowInit(args) {
-  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId } = args;
+  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId, joomlaUrl, joomlaUser, joomlaPassword } = args;
   if (!existsSync7(componentPath)) {
     return JSON.stringify({ success: false, error: `Component not found: ${componentPath}` });
   }
@@ -20277,8 +20280,10 @@ async function executeWorkflowInit(args) {
     totalErrors: 0,
     gates: {
       hardcode_sweep: { status: "pending", iteration: 0 },
-      completion_guard: { status: "pending", iteration: 0 }
-    }
+      completion_guard: { status: "pending", iteration: 0 },
+      browser_verify: { status: "pending", iteration: 0 }
+    },
+    browserVerifyConfig: joomlaUrl ? { joomlaUrl, adminUser: joomlaUser, adminPassword: joomlaPassword } : void 0
   };
   saveWorkflowState(state);
   boundWorkflowId = workflowId;
@@ -20303,6 +20308,7 @@ async function executeWorkflowInit(args) {
     sourceLanguage,
     sourceIniPath: state.sourceIniPath,
     targetIniPath: state.targetIniPath,
+    browserVerifyConfig: state.browserVerifyConfig || null,
     views: views.map((v) => ({
       path: v.relativePath,
       lines: v.lines,
@@ -20321,7 +20327,10 @@ var workflowInitTool = {
       componentPath: { type: "string", description: "Absolute path to the Joomla component" },
       targetLanguage: { type: "string", description: "Target language code (e.g., fr-CA)" },
       sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" },
-      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" }
+      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" },
+      joomlaUrl: { type: "string", description: "Base URL for Joomla admin panel for browser verification" },
+      joomlaUser: { type: "string", description: "Joomla admin username for browser verification" },
+      joomlaPassword: { type: "string", description: "Joomla admin password for browser verification" }
     },
     required: ["componentPath", "targetLanguage"]
   },
@@ -20742,8 +20751,8 @@ var workflowStatusTool = {
 };
 var workflowGateUpdateSchema = external_exports.object({
   workflowId: external_exports.string().describe("Workflow ID"),
-  gateName: external_exports.enum(["hardcode_sweep", "completion_guard"]).describe("Gate to update"),
-  status: external_exports.enum(["pending", "passed", "failed"]).describe("New status")
+  gateName: external_exports.enum(["hardcode_sweep", "completion_guard", "browser_verify"]).describe("Gate to update"),
+  status: external_exports.enum(["pending", "passed", "failed", "skipped"]).describe("New status")
 });
 async function executeWorkflowGateUpdate(args) {
   const locked = loadWorkflowStateLocked(args.workflowId);
@@ -20754,7 +20763,8 @@ async function executeWorkflowGateUpdate(args) {
   if (!state.gates) {
     state.gates = {
       hardcode_sweep: { status: "pending", iteration: 0 },
-      completion_guard: { status: "pending", iteration: 0 }
+      completion_guard: { status: "pending", iteration: 0 },
+      browser_verify: { status: "pending", iteration: 0 }
     };
   }
   const gate = state.gates[args.gateName];
@@ -20763,6 +20773,9 @@ async function executeWorkflowGateUpdate(args) {
     iteration: (gate?.iteration || 0) + 1
   };
   if (args.gateName === "completion_guard" && args.status === "passed") {
+    state.status = "browser_verification";
+  }
+  if (args.gateName === "browser_verify" && (args.status === "passed" || args.status === "skipped")) {
     state.status = "complete";
   }
   saveWorkflowStateAndUnlock(state, lockPath);
@@ -20780,8 +20793,8 @@ var workflowGateUpdateTool = {
     type: "object",
     properties: {
       workflowId: { type: "string", description: "Workflow ID" },
-      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard"], description: "Gate to update" },
-      status: { type: "string", enum: ["pending", "passed", "failed"], description: "New status" }
+      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard", "browser_verify"], description: "Gate to update" },
+      status: { type: "string", enum: ["pending", "passed", "failed", "skipped"], description: "New status" }
     },
     required: ["workflowId", "gateName", "status"]
   },

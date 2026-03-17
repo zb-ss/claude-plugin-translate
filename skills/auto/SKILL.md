@@ -34,6 +34,10 @@ $ARGUMENTS
 - `--dry-run` - Analyze without making changes
 - `--skip-review` - Skip the review step after each view
 - `--resume` - Resume from last incomplete view
+- `--joomla-url <url>` - Joomla admin URL for browser verification (e.g., http://localhost/administrator)
+- `--joomla-user <user>` - Joomla admin username
+- `--joomla-password <pass>` - Joomla admin password
+- `--skip-browser` - Skip browser verification step
 
 ## Examples
 
@@ -88,7 +92,7 @@ You are the **ORCHESTRATOR**. You coordinate the workflow but **NEVER process vi
 
 ### Step 1: Initialize
 
-1. Call `workflow_translate_init(componentPath, targetLanguage, sessionId)` — pass the sessionId received from the delegation prompt
+1. Call `workflow_translate_init(componentPath, targetLanguage, sessionId, joomlaUrl, joomlaUser, joomlaPassword)` — pass the sessionId received from the delegation prompt
 2. Note the `workflowId`, `sourceIniPath`, `targetIniPath`, total views count
 
 ### Step 2: Batch Processing Loop
@@ -331,6 +335,66 @@ if NOT approved after max_guard_attempts:
     Log for manual intervention
 ```
 
+Then proceed to Step 3.5 (Browser Verification).
+
+### Step 3.5: Browser Verification (Optional)
+
+After the completion guard passes, run browser-based verification IF a Joomla URL was provided.
+
+**If `--skip-browser` flag is set OR no joomlaUrl configured:**
+```
+workflow_translate_gate_update(workflowId, "browser_verify", "skipped")
+```
+Skip to Step 4.
+
+**Otherwise, run browser verification:**
+
+```
+browser_attempt = 0
+max_browser_attempts = 2
+
+while browser_attempt < max_browser_attempts:
+    browser_attempt++
+
+    Task(
+      subagent_type="translate:browser-verify",
+      model="sonnet",
+      max_turns=25,
+      prompt="""
+      Browser verification of translated Joomla views.
+
+      joomlaUrl: {browserVerifyConfig.joomlaUrl}
+      adminUser: {browserVerifyConfig.adminUser}
+      adminPassword: {browserVerifyConfig.adminPassword}
+      targetLanguage: {targetLanguage}
+      componentName: {componentName}
+      viewPaths: {list of ALL view relativePaths}
+      """
+    )
+
+    if browser_result.passed:
+        workflow_translate_gate_update(workflowId, "browser_verify", "passed")
+        break
+
+    if browser_attempt < max_browser_attempts:
+        # Try to fix issues found
+        for issue in browser_result.issues:
+            if issue.type == "raw_key":
+                # Missing INI entry — add it
+                Task(subagent_type="general-purpose", model="sonnet", max_turns=15,
+                    prompt="Fix missing translation key {issue.text} for com_{componentName}...")
+            elif issue.type == "english_text" or issue.type == "console_error":
+                Task(subagent_type="general-purpose", model="opus", max_turns=20,
+                    prompt="Fix translation issue in {issue.viewUrl}: {issue details}...")
+
+        # Merge any new INI entries from fix agents
+
+if NOT passed after max_browser_attempts:
+    workflow_translate_gate_update(workflowId, "browser_verify", "failed")
+    # Browser issues are warnings, not blockers — allow workflow to complete
+    # Log for manual intervention
+```
+
 Then proceed to Step 4 (Finalize).
 
 ### Step 4: Finalize
@@ -365,6 +429,14 @@ VERIFICATION RESULTS
   Per-view hardcode sweeps: {N} passed, {N} failed (retried)
   Completion guard: {passed/rejected}
   Final approval: {yes/no}
+
+BROWSER VERIFICATION
+----------------------------------------------------------------
+  Status: {passed/failed/skipped}
+  Pages checked: {N}
+  Raw keys found: {N}
+  Console errors: {N}
+  Attempts: {N}
 
 RETRIES & ESCALATIONS
 ----------------------------------------------------------------
@@ -535,6 +607,8 @@ When reading executor results via `TaskOutput`:
 | Targeted fix | 20 | Fix specific findings from sweep |
 | Targeted fix (opus) | 20 | Escalated fix on 3rd attempt |
 | Completion guard | 30 | Final opus verification of ALL files |
+| Browser verify     | 25  | Browser-based verification of all views           |
+| Browser fix        | 15-20 | Fix issues found by browser verify              |
 
 ---
 

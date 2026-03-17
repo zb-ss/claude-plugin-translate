@@ -97,11 +97,15 @@ function allViewsDone(state) {
 }
 
 /**
- * Check if workflow is fully complete (all views done AND completion guard passed).
+ * Check if workflow is fully complete (all views done, completion guard passed, and browser verify done/skipped).
  */
 function workflowFullyComplete(state) {
-  return allViewsDone(state) &&
-    state.gates?.completion_guard?.status === 'passed';
+  const guardsComplete = state.gates?.completion_guard?.status === 'passed';
+  const browserComplete =
+    state.gates?.browser_verify?.status === 'passed' ||
+    state.gates?.browser_verify?.status === 'skipped' ||
+    !state.gates?.browser_verify;
+  return allViewsDone(state) && guardsComplete && browserComplete;
 }
 
 /**

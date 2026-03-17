@@ -40,7 +40,7 @@ interface WorkflowState {
   sessionId?: string
   created: string
   updated: string
-  status: "scanning" | "processing" | "verification" | "complete" | "error"
+  status: "scanning" | "processing" | "verification" | "browser_verification" | "complete" | "error"
   currentViewIndex: number
   views: ViewInfo[]
   totalStringsConverted: number
@@ -48,6 +48,12 @@ interface WorkflowState {
   gates?: {
     hardcode_sweep: { status: 'pending' | 'passed' | 'failed'; iteration: number }
     completion_guard: { status: 'pending' | 'passed' | 'failed'; iteration: number }
+    browser_verify: { status: 'pending' | 'passed' | 'failed' | 'skipped'; iteration: number }
+  }
+  browserVerifyConfig?: {
+    joomlaUrl: string
+    adminUser?: string
+    adminPassword?: string
   }
 }
 
@@ -315,13 +321,16 @@ export const workflowInitSchema = z.object({
   componentPath: z.string().describe("Absolute path to the Joomla component"),
   targetLanguage: z.string().describe("Target language code (e.g., fr-CA)"),
   sourceLanguage: z.string().default("en-GB").describe("Source language code"),
-  sessionId: z.string().optional().describe("Claude Code session ID for session-scoped tracking")
+  sessionId: z.string().optional().describe("Claude Code session ID for session-scoped tracking"),
+  joomlaUrl: z.string().optional().describe("Base URL for Joomla admin panel for browser verification"),
+  joomlaUser: z.string().optional().describe("Joomla admin username for browser verification"),
+  joomlaPassword: z.string().optional().describe("Joomla admin password for browser verification")
 })
 
 export type WorkflowInitArgs = z.infer<typeof workflowInitSchema>
 
 export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<string> {
-  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId } = args
+  const { componentPath, targetLanguage, sourceLanguage = "en-GB", sessionId, joomlaUrl, joomlaUser, joomlaPassword } = args
 
   if (!existsSync(componentPath)) {
     return JSON.stringify({ success: false, error: `Component not found: ${componentPath}` })
@@ -418,7 +427,9 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
     gates: {
       hardcode_sweep: { status: 'pending', iteration: 0 },
       completion_guard: { status: 'pending', iteration: 0 },
+      browser_verify: { status: 'pending', iteration: 0 },
     },
+    browserVerifyConfig: joomlaUrl ? { joomlaUrl, adminUser: joomlaUser, adminPassword: joomlaPassword } : undefined,
   }
 
   saveWorkflowState(state)
@@ -450,6 +461,7 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
     sourceLanguage,
     sourceIniPath: state.sourceIniPath,
     targetIniPath: state.targetIniPath,
+    browserVerifyConfig: state.browserVerifyConfig || null,
     views: views.map(v => ({
       path: v.relativePath,
       lines: v.lines,
@@ -469,7 +481,10 @@ export const workflowInitTool = {
       componentPath: { type: "string", description: "Absolute path to the Joomla component" },
       targetLanguage: { type: "string", description: "Target language code (e.g., fr-CA)" },
       sourceLanguage: { type: "string", description: "Source language code", default: "en-GB" },
-      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" }
+      sessionId: { type: "string", description: "Claude Code session ID for session-scoped tracking" },
+      joomlaUrl: { type: "string", description: "Base URL for Joomla admin panel for browser verification" },
+      joomlaUser: { type: "string", description: "Joomla admin username for browser verification" },
+      joomlaPassword: { type: "string", description: "Joomla admin password for browser verification" }
     },
     required: ["componentPath", "targetLanguage"]
   },
@@ -987,8 +1002,8 @@ export const workflowStatusTool = {
 
 export const workflowGateUpdateSchema = z.object({
   workflowId: z.string().describe("Workflow ID"),
-  gateName: z.enum(['hardcode_sweep', 'completion_guard']).describe("Gate to update"),
-  status: z.enum(['pending', 'passed', 'failed']).describe("New status"),
+  gateName: z.enum(['hardcode_sweep', 'completion_guard', 'browser_verify']).describe("Gate to update"),
+  status: z.enum(['pending', 'passed', 'failed', 'skipped']).describe("New status"),
 })
 
 export type WorkflowGateUpdateArgs = z.infer<typeof workflowGateUpdateSchema>
@@ -1004,17 +1019,24 @@ export async function executeWorkflowGateUpdate(args: WorkflowGateUpdateArgs): P
     state.gates = {
       hardcode_sweep: { status: 'pending', iteration: 0 },
       completion_guard: { status: 'pending', iteration: 0 },
+      browser_verify: { status: 'pending', iteration: 0 },
     }
   }
 
   const gate = state.gates[args.gateName]
-  state.gates[args.gateName] = {
+  // Use type assertion: browser_verify accepts 'skipped', others don't, but runtime is safe
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(state.gates as any)[args.gateName] = {
     status: args.status,
     iteration: (gate?.iteration || 0) + 1,
   }
 
-  // If completion guard passes, set workflow status to complete
+  // If completion guard passes, move to browser verification phase
   if (args.gateName === 'completion_guard' && args.status === 'passed') {
+    state.status = 'browser_verification'
+  }
+  // If browser verify passes or is skipped, set workflow status to complete
+  if (args.gateName === 'browser_verify' && (args.status === 'passed' || args.status === 'skipped')) {
     state.status = 'complete'
   }
 
@@ -1035,8 +1057,8 @@ export const workflowGateUpdateTool = {
     type: "object" as const,
     properties: {
       workflowId: { type: "string", description: "Workflow ID" },
-      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard"], description: "Gate to update" },
-      status: { type: "string", enum: ["pending", "passed", "failed"], description: "New status" },
+      gateName: { type: "string", enum: ["hardcode_sweep", "completion_guard", "browser_verify"], description: "Gate to update" },
+      status: { type: "string", enum: ["pending", "passed", "failed", "skipped"], description: "New status" },
     },
     required: ["workflowId", "gateName", "status"]
   },
