@@ -194,7 +194,14 @@ function getWorkflowForSession(sessionId) {
       // Fall through to getActiveTranslateWorkflow()
     }
   }
-  // No binding file at all — fall back to global discovery (backward compat)
+  // No binding file — this session has never called workflow_translate_init,
+  // so it is NOT a translate session. Return null to avoid blocking unrelated
+  // sessions with another session's workflow.
+  // Only fall back to global discovery for sessions without a sessionId at all
+  // (backward compat for very old callers).
+  if (sessionId) {
+    return null;
+  }
   return getActiveTranslateWorkflow();
 }
 
