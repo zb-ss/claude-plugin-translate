@@ -20000,6 +20000,7 @@ var i18nVerifyTool = {
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync, unlinkSync, openSync, closeSync, constants as fsConstants } from "fs";
 import { join as join2, basename as basename5, dirname as dirname3 } from "path";
 import { homedir, tmpdir } from "os";
+var boundWorkflowId = null;
 function getWorkflowDir() {
   const home = process.env.HOME || homedir();
   return join2(home, ".claude/workflows/translate");
@@ -20082,6 +20083,13 @@ function saveWorkflowStateAndUnlock(state, lockPath) {
   releaseLock(lockPath);
 }
 function findActiveWorkflow(sessionId) {
+  if (boundWorkflowId) {
+    const state = loadWorkflowState(boundWorkflowId);
+    if (state && state.status !== "complete") {
+      return boundWorkflowId;
+    }
+    boundWorkflowId = null;
+  }
   if (sessionId) {
     const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
     try {
@@ -20090,6 +20098,7 @@ function findActiveWorkflow(sessionId) {
         if (binding.workflow_id) {
           const state = loadWorkflowState(binding.workflow_id);
           if (state && state.status !== "complete") {
+            boundWorkflowId = binding.workflow_id;
             return binding.workflow_id;
           }
         }
@@ -20217,6 +20226,7 @@ async function executeWorkflowInit(args) {
     }
     if (existingLock)
       releaseLock(existingLock);
+    boundWorkflowId = workflowId;
     if (sessionId) {
       const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
       const statePath = getWorkflowStatePath(workflowId);
@@ -20271,6 +20281,7 @@ async function executeWorkflowInit(args) {
     }
   };
   saveWorkflowState(state);
+  boundWorkflowId = workflowId;
   if (sessionId) {
     const bindingPath = join2(tmpdir(), `translate-binding-${sessionId}.json`);
     const statePath = getWorkflowStatePath(workflowId);

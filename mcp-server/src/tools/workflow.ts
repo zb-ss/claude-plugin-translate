@@ -51,6 +51,10 @@ interface WorkflowState {
   }
 }
 
+// Process-scoped workflow binding — each CC instance gets its own MCP server process,
+// so this variable is inherently session-scoped without needing LLM cooperation.
+let boundWorkflowId: string | null = null
+
 // Helper functions
 import { homedir, tmpdir } from "os"
 
@@ -154,20 +158,36 @@ function saveWorkflowStateAndUnlock(state: WorkflowState, lockPath: string): voi
 }
 
 /**
- * Resolve a workflowId from session binding, then fall back to global discovery.
- * When a sessionId is provided, checks /tmp/translate-binding-{sessionId}.json first.
+ * Resolve a workflowId using a 3-tier lookup:
+ *   1. Process-scoped in-memory binding (set by workflow_translate_init in this MCP process)
+ *   2. Session binding file on disk (/tmp/translate-binding-{sessionId}.json)
+ *   3. Global discovery (most recent non-complete workflow directory)
+ *
+ * Tier 1 is the primary concurrency fix: each CC instance has its own MCP server
+ * process, so the in-memory variable is inherently instance-scoped.
  */
 function findActiveWorkflow(sessionId?: string): string | null {
-  // 1. Try session-scoped binding first
+  // Tier 1: Process-scoped in-memory binding (most reliable for concurrency)
+  if (boundWorkflowId) {
+    const state = loadWorkflowState(boundWorkflowId)
+    if (state && state.status !== "complete") {
+      return boundWorkflowId
+    }
+    // Workflow completed or deleted — clear stale binding
+    boundWorkflowId = null
+  }
+
+  // Tier 2: Session binding file on disk
   if (sessionId) {
     const bindingPath = join(tmpdir(), `translate-binding-${sessionId}.json`)
     try {
       if (existsSync(bindingPath)) {
         const binding = JSON.parse(readFileSync(bindingPath, "utf-8"))
         if (binding.workflow_id) {
-          // Verify the workflow still exists and is not complete
           const state = loadWorkflowState(binding.workflow_id)
           if (state && state.status !== "complete") {
+            // Promote to in-memory binding for future calls
+            boundWorkflowId = binding.workflow_id
             return binding.workflow_id
           }
         }
@@ -177,7 +197,7 @@ function findActiveWorkflow(sessionId?: string): string | null {
     }
   }
 
-  // 2. Fall back to global discovery (finds most recent non-complete workflow)
+  // Tier 3: Global discovery (finds most recent non-complete workflow)
   const activeDir = getWorkflowDir()
   if (!existsSync(activeDir)) return null
 
@@ -336,6 +356,9 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
     }
     if (existingLock) releaseLock(existingLock)
 
+    // Bind this MCP process to the workflow (primary concurrency fix)
+    boundWorkflowId = workflowId
+
     // Write session binding for the new session
     if (sessionId) {
       const bindingPath = join(tmpdir(), `translate-binding-${sessionId}.json`)
@@ -399,6 +422,9 @@ export async function executeWorkflowInit(args: WorkflowInitArgs): Promise<strin
   }
 
   saveWorkflowState(state)
+
+  // Bind this MCP process to the workflow (primary concurrency fix)
+  boundWorkflowId = workflowId
 
   // Write session binding file for session-scoped stop-guard lookup
   if (sessionId) {
