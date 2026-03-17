@@ -391,9 +391,11 @@ while browser_attempt < max_browser_attempts:
 
 if NOT passed after max_browser_attempts:
     workflow_translate_gate_update(workflowId, "browser_verify", "failed")
-    # Browser issues are warnings, not blockers — allow workflow to complete
-    # Log for manual intervention
+    # Browser issues are BLOCKING — workflow will NOT be marked complete
+    # Report all unresolved issues to the user for manual intervention
 ```
+
+**IMPORTANT**: If browser verification fails after all retry attempts, the workflow stays in `browser_verification` status (not `complete`). The user must manually fix remaining issues and re-run, or explicitly skip with `--skip-browser`.
 
 Then proceed to Step 4 (Finalize).
 
