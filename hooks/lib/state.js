@@ -166,7 +166,9 @@ function bindSessionToWorkflow(sessionId, workflowPath, workflowId) {
 /**
  * Get the translate workflow bound to a session.
  * Reads the binding file, loads the state, and returns { path, state }.
- * Falls back to getActiveTranslateWorkflow() if no binding exists.
+ * Falls back to getActiveTranslateWorkflow() ONLY if no binding file exists.
+ * If a binding exists but the workflow is complete, returns null — never
+ * cross-pollinate by finding another session's workflow.
  */
 function getWorkflowForSession(sessionId) {
   if (sessionId && typeof sessionId === 'string') {
@@ -184,11 +186,15 @@ function getWorkflowForSession(sessionId) {
             }
           }
         }
+        // Binding exists but workflow is complete — this session is done.
+        // Do NOT fall through to global discovery (would find another session's workflow).
+        return null;
       }
     } catch {
       // Fall through to getActiveTranslateWorkflow()
     }
   }
+  // No binding file at all — fall back to global discovery (backward compat)
   return getActiveTranslateWorkflow();
 }
 
