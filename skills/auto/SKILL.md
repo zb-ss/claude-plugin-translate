@@ -53,13 +53,21 @@ $ARGUMENTS
 
 When this skill is invoked, you MUST immediately delegate the entire orchestration to a dedicated orchestrator subagent. Do NOT run the orchestration loop yourself.
 
-1. Parse the arguments (`componentPath`, `targetLanguage`, flags like `--dry-run`, `--resume`, `--skip-review`)
+1. Parse ALL arguments:
+   - **Required**: `componentPath`, `targetLanguage`
+   - **Flags**: `--dry-run`, `--resume`, `--skip-review`, `--skip-browser`
+   - **Browser verification**: `--joomla-url <url>`, `--joomla-user <user>`, `--joomla-password <pass>`
 2. Obtain the `session_id` from the current session context (it is available via the SessionStart hook's `additionalContext` or from the hook input)
 3. Spawn a single Task agent with:
    - **Agent type**: `translate:orchestrator`
    - **Model**: `sonnet`
    - **max_turns**: `50`
-   - **Prompt**: Include the FULL orchestrator instructions below, substituting the parsed arguments. Include `sessionId: {session_id}` so the orchestrator can pass it to `workflow_translate_init`
+   - **Prompt**: Include the FULL orchestrator instructions below, substituting ALL parsed arguments. You MUST include:
+     - `sessionId: {session_id}`
+     - `joomlaUrl: {--joomla-url value or "none"}`
+     - `joomlaUser: {--joomla-user value or "none"}`
+     - `joomlaPassword: {--joomla-password value or "none"}`
+     - `skipBrowser: {true if --skip-browser flag present, false otherwise}`
 
 The orchestrator subagent will then spawn its own executor subagents for each view via the Task tool.
 
